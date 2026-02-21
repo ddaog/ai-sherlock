@@ -4,8 +4,15 @@ import { useState, useRef, useEffect } from "react";
 import type { Hypothesis } from "@/lib/hypothesesSimple";
 import { VICTIM_NAME } from "@/data/case.display";
 
-const SESSION_STORAGE_KEY = "case_session_state_v8";
+const SESSION_STORAGE_KEY = "case_session_state_v9";
 const MAX_HYPOTHESES = 5;
+const MAX_HINTS = 3;
+
+const SLASH_COMMANDS = [
+  { cmd: "/가설", desc: "가설 기록" },
+  { cmd: "/추리", desc: "결론 제출" },
+  { cmd: "/힌트", desc: "힌트 요청 (3회 제한)" },
+] as const;
 
 function highlightVictim(text: string, victim: string) {
   if (!victim) return text;
@@ -85,6 +92,7 @@ interface GameSessionState {
   triggeredBadges: string[];
   messages?: Message[];
   hypotheses?: Hypothesis[];
+  hintCount?: number;
 }
 
 function loadSessionState(): Partial<GameSessionState> | null {
@@ -121,8 +129,12 @@ export default function Home() {
   >(undefined);
   const [pendingReset, setPendingReset] = useState(false);
   const [suggestionIndex, setSuggestionIndex] = useState(-1);
+  const [hintCount, setHintCount] = useState(0);
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [commandPaletteIndex, setCommandPaletteIndex] = useState(0);
   const logEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const paletteRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const saved = loadSessionState();
@@ -132,6 +144,7 @@ export default function Home() {
       if (saved.triggeredBadges) setTriggeredBadges(saved.triggeredBadges);
       if (Array.isArray(saved.messages) && saved.messages.length > 0) setMessages(saved.messages);
       if (Array.isArray(saved.hypotheses)) setHypotheses(saved.hypotheses.slice(0, MAX_HYPOTHESES));
+      if (typeof saved.hintCount === "number") setHintCount(saved.hintCount);
     }
   }, []);
 
@@ -143,8 +156,9 @@ export default function Home() {
       triggeredBadges,
       messages,
       hypotheses,
+      hintCount,
     });
-  }, [solved, seenRecordIds, triggeredBadges, messages, hypotheses]);
+  }, [solved, seenRecordIds, triggeredBadges, messages, hypotheses, hintCount]);
 
   const handleRestart = () => {
     saveSessionState({
@@ -153,15 +167,18 @@ export default function Home() {
       triggeredBadges: [],
       messages: [],
       hypotheses: [],
+      hintCount: 0,
     });
     setSolved(false);
     setMessages([]);
     setHypotheses([]);
     setSeenRecordIds([]);
     setTriggeredBadges([]);
+    setHintCount(0);
     setInput("");
     setPendingHypothesisReplace(undefined);
     setPendingReset(false);
+    setShowCommandPalette(false);
     inputRef.current?.focus();
   };
 
@@ -213,6 +230,7 @@ export default function Home() {
     }
 
     setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
+    setShowCommandPalette(false);
     setInput("");
     setLoading(true);
 
@@ -245,6 +263,7 @@ export default function Home() {
           sessionState: {
             solved,
             solvedAt: solved ? new Date().toISOString() : undefined,
+            hintCount,
             ...(pendingHypothesisReplace && { pendingHypothesisReplace }),
           },
         }),
@@ -276,6 +295,7 @@ export default function Home() {
       if (Array.isArray(data.triggeredBadges)) setTriggeredBadges(data.triggeredBadges);
       if (data.solved === true) setSolved(true);
       setPendingHypothesisReplace(data.sessionState?.pendingHypothesisReplace);
+      if (typeof data.sessionState?.hintCount === "number") setHintCount(data.sessionState.hintCount);
 
       setMessages((prev) => [
         ...prev,
@@ -307,10 +327,38 @@ export default function Home() {
     }
   };
 
+  const handleSelectCommand = (cmd: string) => {
+    setInput(cmd + " ");
+    setShowCommandPalette(false);
+    setCommandPaletteIndex(0);
+    inputRef.current?.focus();
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // "/" 입력 시 상위 핸들러(예: Cursor 슬래시 명령)가 가로채지 않도록 전파 차단
     if (e.key === "/") {
       e.stopPropagation();
+    }
+    if (showCommandPalette) {
+      if (e.key === "Escape") {
+        setShowCommandPalette(false);
+        return;
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setCommandPaletteIndex((i) => (i + 1) % SLASH_COMMANDS.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setCommandPaletteIndex((i) => (i - 1 + SLASH_COMMANDS.length) % SLASH_COMMANDS.length);
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        handleSelectCommand(SLASH_COMMANDS[commandPaletteIndex].cmd);
+        return;
+      }
     }
     if (e.key === "Enter" && !e.shiftKey) {
       // IME 조합 중(한글 등)에는 Enter를 가로채지 않음
@@ -319,7 +367,7 @@ export default function Home() {
       handleSubmit();
       return;
     }
-    if (e.key === "ArrowUp" && lastSuggestions.length > 0) {
+    if (e.key === "ArrowUp" && lastSuggestions.length > 0 && !showCommandPalette) {
       e.preventDefault();
       const next =
         suggestionIndex <= 0 ? lastSuggestions.length - 1 : suggestionIndex - 1;
@@ -327,7 +375,7 @@ export default function Home() {
       setInput(lastSuggestions[next]);
       return;
     }
-    if (e.key === "ArrowDown" && lastSuggestions.length > 0) {
+    if (e.key === "ArrowDown" && lastSuggestions.length > 0 && !showCommandPalette) {
       e.preventDefault();
       const next =
         suggestionIndex >= lastSuggestions.length - 1 ? 0 : suggestionIndex + 1;
@@ -393,6 +441,7 @@ export default function Home() {
               <p className="font-mono text-archive-accent text-[11px] tracking-widest uppercase mb-4">[플레이 방법]</p>
               <p><span className="font-mono text-archive-accent">/가설</span> 가설 기록. 예: /가설 박지훈이 범인인 것 같아</p>
               <p><span className="font-mono text-archive-accent">/추리</span> 결론 제출. 예: /추리 박지훈이 비자금 때문에 약물로 범행했다</p>
+              <p><span className="font-mono text-archive-accent">/힌트</span> 적당한 힌트 제공 (3회 제한)</p>
               <p><span className="font-mono text-archive-accent">/초기화</span> localStorage 삭제 후 게임 다시 시작 (Y/N 확인)</p>
             </div>
           )}
@@ -487,19 +536,70 @@ export default function Home() {
             </div>
           ) : (
             <div className="flex gap-4">
-              <textarea
-                ref={inputRef}
-                value={input}
-                onChange={(e) => {
-                  setInput(e.target.value);
-                  setSuggestionIndex(-1);
-                }}
-                onKeyDown={handleKeyDown}
-                placeholder="질문하세요. 결론: /추리 [범인]. [동기]. [수법]"
-                className="flex-1 min-h-[52px] max-h-32 px-5 py-3.5 rounded-sm bg-black/60 border border-archive-border text-archive-text placeholder-archive-muted-deep focus:outline-none focus:border-archive-accent focus:ring-1 focus:ring-archive-accent/50 resize-none text-[16px] font-serif transition-colors shadow-inner"
-                rows={1}
-                disabled={loading}
-              />
+              <div className="flex-1 relative">
+                <div className="flex items-stretch rounded-sm border border-archive-border bg-black/60 focus-within:border-archive-accent focus-within:ring-1 focus-within:ring-archive-accent/50">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInput("/");
+                    setShowCommandPalette(true);
+                    setCommandPaletteIndex(0);
+                    inputRef.current?.focus();
+                  }}
+                  className="shrink-0 px-3 text-archive-muted hover:text-archive-accent transition-colors font-mono text-lg"
+                  title="명령어 목록"
+                >
+                  /
+                </button>
+                <textarea
+                  ref={inputRef}
+                  value={input}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setInput(v);
+                    setSuggestionIndex(-1);
+                    setShowCommandPalette(v.startsWith("/"));
+                    if (v.startsWith("/")) setCommandPaletteIndex(0);
+                  }}
+                  onKeyDown={handleKeyDown}
+                  onFocus={() => {
+                    if (input.startsWith("/")) setShowCommandPalette(true);
+                  }}
+                  onBlur={() => {
+                    setTimeout(() => setShowCommandPalette(false), 150);
+                  }}
+                  placeholder="질문해서 사건을 파악해보세요. '/'을 입력해 기능을 사용해보세요."
+                  className="flex-1 min-h-[52px] max-h-32 px-3 py-3.5 bg-transparent text-archive-text placeholder-archive-muted-deep focus:outline-none resize-none text-[16px] font-serif transition-colors"
+                  rows={1}
+                  disabled={loading}
+                />
+                </div>
+                {showCommandPalette && (
+                  <div
+                    ref={paletteRef}
+                    className="absolute bottom-full left-0 mb-1 w-full rounded-sm border border-archive-border bg-archive-surface shadow-xl overflow-hidden z-20"
+                  >
+                  <p className="px-4 py-2 text-archive-muted-deep text-[11px] font-mono tracking-widest uppercase border-b border-archive-border">
+                    명령어
+                  </p>
+                  {SLASH_COMMANDS.map(({ cmd, desc }, i) => (
+                    <button
+                      key={cmd}
+                      type="button"
+                      onClick={() => handleSelectCommand(cmd)}
+                      className={`w-full px-4 py-2.5 text-left flex items-center gap-3 transition-colors ${
+                        i === commandPaletteIndex
+                          ? "bg-archive-accent/20 text-archive-accent"
+                          : "text-archive-text hover:bg-archive-surface/80"
+                      }`}
+                    >
+                      <span className="font-mono text-archive-accent">{cmd}</span>
+                      <span className="text-sm text-archive-muted">{desc}</span>
+                    </button>
+                  ))}
+                  </div>
+                )}
+              </div>
               <button
                 onClick={handleSubmit}
                 disabled={loading || !input.trim()}

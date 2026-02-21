@@ -112,6 +112,7 @@ export async function POST(req: NextRequest) {
     sessionState?: {
       solved?: boolean;
       solvedAt?: string;
+      hintCount?: number;
       pendingHypothesisReplace?: { newText: string; matchedHypothesisId: string };
     };
   };
@@ -167,6 +168,64 @@ export async function POST(req: NextRequest) {
   }
   if (!query || typeof query !== "string") {
     return NextResponse.json({ error: "query is required" }, { status: 400 });
+  }
+
+  const hintCount = Math.min(3, Math.max(0, Number(incomingSession?.hintCount) || 0));
+
+  if (/^\/힌트$/i.test(query.trim())) {
+    const MAX_HINTS = 3;
+    if (hintCount >= MAX_HINTS) {
+      return NextResponse.json({
+        response: `힌트는 ${MAX_HINTS}번까지 사용 가능합니다. (${hintCount}/${MAX_HINTS} 사용 완료)`,
+        sources: [],
+        suggestions: [
+          "7월 18일 당시 별관 출입 기록은?",
+          "피해자 김도윤과 관련된 인물은?",
+          "CCTV 기록에서 확인된 시간대는?",
+        ],
+        hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
+        seenRecordIds,
+        triggeredBadges,
+        solved: false,
+        sessionState: { solved: false, hintCount },
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+      });
+    }
+    const config = CASE_CONFIG;
+    const hints: string[] = [
+      "21시 전후 3층 복도와 집무실의 동선을 추적해 보세요. 누가 언제 출입했는지가 중요합니다.",
+      "김도윤이 쓰러지기 전에 무슨 일이 있었는지, 약물·타격·지문과 관련된 기록을 찾아보세요.",
+      "감사와 비자금, 해외 송금, 보안 USB 같은 키워드로 기록을 검색해 보세요.",
+    ];
+    const requiredHints = config.nextQuestions?.requiredRecordHint
+      ? Object.entries(config.nextQuestions.requiredRecordHint).map(([id, q]) => ({ id, q }))
+      : [];
+    const unseenRequired = requiredHints.filter((r) => !seenRecordIds.includes(r.id));
+    let hintText: string;
+    if (hintCount === 0) {
+      hintText = hints[0];
+    } else if (hintCount === 1) {
+      hintText = hints[1];
+    } else {
+      hintText = unseenRequired.length > 0
+        ? `[힌트] ${unseenRequired[0].q}`
+        : hints[2];
+    }
+    return NextResponse.json({
+      response: `[힌트 ${hintCount + 1}/${MAX_HINTS}] ${hintText}`,
+      sources: [],
+      suggestions: [
+        "7월 18일 당시 별관 출입 기록은?",
+        "피해자 김도윤과 관련된 인물은?",
+        "CCTV 기록에서 확인된 시간대는?",
+      ],
+      hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
+      seenRecordIds,
+      triggeredBadges,
+      solved: false,
+      sessionState: { solved: false, hintCount: hintCount + 1 },
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+    });
   }
 
   const pendingReplace = incomingSession?.pendingHypothesisReplace;
