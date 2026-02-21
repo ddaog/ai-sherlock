@@ -1,55 +1,44 @@
 /**
  * 케이스별 설정 파일.
- * 이 파일만 수정하면 사건/스토리가 바뀌도록 설계됨.
- * 아래 값은 예시용(placeholder)이며, 실제 프로젝트의 사건/인물/키워드에 맞게 편집 필요.
+ * 이 파일만 수정하면 다른 사건으로 교체 가능.
+ * solution/정답 데이터는 서버 전용이며 LLM에 절대 전달하지 않는다.
  */
 
 export interface CaseConfig {
   caseId: string;
 
+  /** 사건 브리핑 (선택) */
+  briefing?: {
+    title: string;
+    lines: string[];
+  };
+
   /** 서버 전용 정답. LLM에 절대 전달하지 말 것. */
   solution: {
     culprit: string;
+    /** 공범이 있을 때. 모두 포함해야 정답. 없으면 culprit만 사용 */
+    culprits?: string[];
     motive_keywords: string[];
     method_keywords: string[];
     required_records: string[];
   };
 
-  /** 제출 감지 규칙 (케이스별로 바뀔 수 있음) */
-  submission: {
-    minLen: number;
-    threshold: number;
-    positiveSignals: {
-      conclusion: RegExp;
-      suspect: RegExp;
-      motive: RegExp;
-      method: RegExp;
-      structure: {
-        suspect: RegExp;
-        motive: RegExp;
-        method: RegExp;
-      };
-    };
-    negativeSignals: {
-      questionLike: RegExp;
-    };
-  };
-
-  /** 결론 파싱 규칙 (케이스별로 바뀔 수 있음) */
+  /** 결론 파싱 규칙 (케이스별) */
   parsing: {
     suspectMentioned: RegExp;
     hasMotive: RegExp;
     hasMethod: RegExp;
+    suspectNormalize?: { from: RegExp; to: string }[];
   };
 
-  /** 엔딩 스토리 템플릿 (케이스별로 바뀔 수 있음) */
+  /** 엔딩 스토리 (정답 일치 시 출력, 5~7줄) */
   ending: {
     solvedTitle: string;
     solvedSummaryLines: string[];
     closedLine: string;
   };
 
-  /** NEXT 질문 생성용 (룰 기반, 케이스별) */
+  /** NEXT 질문 생성용 (룰 기반) */
   nextQuestions?: {
     motive: string[];
     method: string[];
@@ -58,68 +47,57 @@ export interface CaseConfig {
   };
 }
 
-/** 예시용: 7월 18일 사건 (evidence.json 기준) */
 export const CASE_CONFIG: CaseConfig = {
-  caseId: "case_20250718",
+  caseId: "case_20250718_heist",
+
+  briefing: {
+    title: "7월 18일 별관 사건",
+    lines: [
+      "7월 18일 밤, 회사 별관 3층에서 CFO 김도윤이 의식불명 상태로 발견되었다.",
+      "외부 침입 흔적은 없으며, 당시 출입 인원은 총 7명이다.",
+      "기록을 조회하며 사건의 전말을 재구성하세요.",
+    ],
+  },
 
   solution: {
     culprit: "박지훈",
-    motive_keywords: ["감사", "부대비용", "서류", "내부감사", "결산", "원한"],
-    method_keywords: ["타격", "후두부", "때렸", "때린", "습격", "공격"],
-    required_records: ["001", "004", "005", "007", "026"],
-  },
-
-  submission: {
-    minLen: 15,
-    threshold: 4,
-    positiveSignals: {
-      conclusion: /^(결론|내\s*결론|제\s*판단|정리하면|요약하면|결론적으로)/i,
-      suspect: /(범인|범인은|범인이|가한\s*사람|한\s*사람은)\s*(은|는|이|가)?\s*[가-힣]{2,4}/i,
-      motive: /(동기|동기는|원한|이유|때문에|감사|서류|부대비용)/i,
-      method: /(방법|방법은|때렸|타격|습격|공격|후두부)/i,
-      structure: {
-        suspect: /(박지훈|이서연|최민수|정하은|강태우|윤서현|김도윤)\s*(이|가)\s*(범인|했다|가했다)/i,
-        motive: /(동기|원한|이유)[는은]?\s*[가-힣\s]+/i,
-        method: /(방법|타격|습격)[는은]?\s*[가-힣\s]+/i,
-      },
-    },
-    negativeSignals: {
-      questionLike: /(누가|뭐가|어떻게|왜|언제|어디서)\s*(했|했을|했나|했지|했어)/i,
-    },
+    culprits: ["박지훈", "이서연"],
+    motive_keywords: ["비자금", "횡령", "가로채", "탈취", "내연", "공범", "해외", "도피", "감사"],
+    method_keywords: ["약물", "수면제", "이완제", "텀블러", "지문", "타격", "후두부", "보안 USB"],
+    required_records: ["011", "021", "025", "035", "039"],
   },
 
   parsing: {
-    suspectMentioned: /(박지훈|이서연|최민수|정하은|강태우|윤서현)/,
-    hasMotive: /(감사|부대비용|서류|내부감사|결산|원한|동기|이유)/i,
-    hasMethod: /(타격|후두부|때렸|때린|습격|공격|방법)/i,
+    suspectMentioned: /(박지훈|이서연|최민수|정하은|강태우|윤서현|김도윤|공범)/,
+    hasMotive: /(비자금|횡령|가로채|탈취|돈|비밀|내연|감사|동기|이유)/i,
+    hasMethod: /(약물|수면제|약|이완제|지문|기절|타격|방법|수법)/i,
   },
 
   ending: {
-    solvedTitle: "사건 해결.",
+    solvedTitle: "사건 해결: 퍼펙트 하이스트의 종말",
     solvedSummaryLines: [
-      "7월 18일 22:45, 별관 3층에서 CFO 김도윤이 후두부 타격으로 의식불명 상태로 발견되었다.",
-      "감사팀장 박지훈은 19일 내부 감사 예정으로 김도윤 담당 구역(재무·회계) 점검을 앞두고 있었다.",
-      "박지훈은 21:10~21:20 김도윤 집무실에 입실해 서류를 소지한 채 퇴실한 것으로 CCTV에 기록되었다.",
-      "감사 관련 이메일에서 김도윤은 18일 저녁 별관에서 서류를 정리해 둘 예정이라고 회신했다.",
-      "박지훈의 동기는 부대비용·결산 관련 서류 은폐, 방법은 후두부 타격으로 판단된다.",
-      "사건은 수사 기관에 이관되었으며, 관련 기록은 증거로 보관되었다.",
+      "7월 18일 밤 쓰러진 CFO 김도윤은 사실 회사의 자금을 해외 페이퍼컴퍼니로 빼돌리던 부패 임원이었다.",
+      "감사팀장 박지훈과 재무부장 이서연은 이 사실을 눈치챘으나, 고발하는 대신 자신들이 그 돈을 가로채 도망치기로 모의했다.",
+      "21:12, 박지훈은 김도윤의 집무실에 들어가 질책하는 척하며 그의 텀블러에 강력한 근육 이완제를 탔고, 완벽한 알리바이를 위해 퇴근했다.",
+      "21:40, 이서연이 투약 효과로 쓰러져 의식이 몽롱해진 김도윤의 후두부를 내리쳤고, 그의 지문을 이용해 비자금이 담긴 보안 USB의 락을 풀고 탈취했다.",
+      "오랜 시간 뒤 희미한 의식으로 복도에 기어나온 그는 결국 119에 실려갔고, 항공권을 예약했던 두 내연 공범은 출국 직전 체포되었다.",
     ],
-    closedLine: "사건 상태: CLOSED",
+    closedLine: "사건 상태: CLOSED (내부 횡령 및 특수 상해)",
   },
 
   nextQuestions: {
-    motive: ["감사 관련 이메일 내용은?", "부대비용·결산 관련 기록은?"],
-    method: ["후두부 타격이나 물증 기록은?", "21시경 3층에서 무슨 일이 있었는지?"],
+    motive: ["CFO 김도윤이 숨기고 있던 진짜 비밀은?", "박지훈과 이서연의 관계를 증명할 단서는?"],
+    method: ["김도윤이 타격을 받기 전부터 쓰러져 있었던 이유는?", "김도윤의 지문만으로 열 수 있는 물건은?"],
     requiredRecordHint: {
-      "001": "사건 발견 당시 상황 기록은?",
-      "004": "감사 관련 서류 요청 이메일은?",
-      "005": "김도윤의 18일 저녁 회신 내용은?",
-      "007": "21:10~21:20 3층 복도 CCTV 기록은?",
-      "026": "박지훈이 김도윤 집무실에서 한 행동은?",
+      "011": "박지훈과 개인적으로 나눈 은밀한 메시지의 내용은?",
+      "021": "김도윤의 책상에서 발견된 비정상적인 해외 송금 관련 단서는?",
+      "025": "김도윤의 지문 근처에서 발견된 물질과 현장 감식 결과는?",
+      "035": "이서연이 21:40경 남긴 결정적인 동선 침입의 흔적은?",
+      "039": "박지훈이 사건 당일 약국에서 구한 물건의 정체는?",
     },
     crossCheck: [
-      "21:10~21:20 3층 CCTV 기록은?",
-      "박지훈과 김도윤의 감사 관련 대화 기록은?",
+      "박지훈의 알리바이 조작 시도와 텀블러의 잔여물을 연결해 보았는가?",
+      "두 명의 동선(21:12와 21:40)을 합치면 퍼즐이 어떻게 맞춰지는가?",
     ],
   },
 };

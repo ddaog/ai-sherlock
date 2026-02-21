@@ -18,7 +18,6 @@ import {
 import { evaluateBadges } from "@/lib/badgeEngine";
 import { loadEvidenceSync } from "@/lib/embeddings";
 import { CASE_CONFIG } from "@/data/case.config";
-import { detectSubmission } from "@/lib/submissionDetector";
 import { parseSubmission } from "@/lib/submissionParser";
 import { gradeSubmission, isSolved } from "@/lib/grader";
 
@@ -91,7 +90,8 @@ SUGGESTION:
 - 감사 관련 이메일 내용은?
 
 ## 결론 제출 시
-RESPONSE: 근거 확인을 위해 아래 기록을 추가로 조회해 보시기 바랍니다.
+결론은 /추리 명령으로 제출해야 합니다. 예: /추리 [범인]. [범행 동기]. [범행 수법]
+결론 형식의 일반 질문이면: RESPONSE: 근거 확인을 위해 /추리로 결론을 제출해 주세요.
 SUGGESTION에 관련 조회 예시 2~3개 제시.`;
 
 export async function POST(req: NextRequest) {
@@ -132,7 +132,7 @@ export async function POST(req: NextRequest) {
 
   if (incomingSession?.solved === true) {
     return NextResponse.json({
-      response: "이미 종결된 사건입니다. '다시 시작'을 눌러주세요.",
+      response: "사건이 종결되었습니다. 새로고침 후 다시 시작하세요.",
       sources: [],
       suggestions: [],
       hypotheses: [],
@@ -374,59 +374,69 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  const config = CASE_CONFIG;
-  const { submission: isSubmission } = detectSubmission(query, config.submission);
+  if (query.trim().startsWith("/추리 ")) {
+    const config = CASE_CONFIG;
+    const gameText = query.trim().replace(/^\/추리\s+/i, "").trim();
 
-  if (isSubmission) {
-    const parse = parseSubmission(query, config, config.solution);
-    const requiredSeen = config.solution.required_records.filter((id) =>
-      seenRecordIds.includes(id)
-    );
+    if (!gameText) {
+      return NextResponse.json({
+        response: "결론 내용을 입력해 주세요. 예: /추리 박지훈이 감사 발각을 막으려고 약물을 혼입해 범행했다.",
+        sources: [],
+        suggestions: [
+          "'누가/왜/어떻게'를 한 문장으로 정리해 주세요.",
+          "예: 'A가 B 때문에 C로 범행했다.'",
+        ],
+        hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
+        seenRecordIds,
+        triggeredBadges,
+        solved: false,
+        sessionState: { solved: false },
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+      });
+    }
+
+    const parse = parseSubmission(gameText, config.parsing, config.solution);
+    const requiredSeen = config.solution.required_records.filter((id) => seenRecordIds.includes(id));
     const required_ratio =
       config.solution.required_records.length > 0
         ? requiredSeen.length / config.solution.required_records.length
         : 1;
-    const grade = gradeSubmission(parse, required_ratio);
-    const solved = isSolved(grade, query, parse, config.solution);
 
-    const nextQuestions: string[] = [];
+    const grade = gradeSubmission(parse, required_ratio);
+    const solved = isSolved(grade, gameText, parse, config.solution);
+
     const nq = config.nextQuestions;
+    const nextQuestions: string[] = [];
     if (nq) {
-      if (!parse.hasMotive && nq.motive.length > 0)
-        nextQuestions.push(nq.motive[0]);
-      if (!parse.hasMethod && nq.method.length > 0)
-        nextQuestions.push(nq.method[0]);
+      if (!parse.hasMotive && nq.motive.length > 0) nextQuestions.push(nq.motive[0]);
+      if (!parse.hasMethod && nq.method.length > 0) nextQuestions.push(nq.method[0]);
       if (required_ratio < 0.66) {
-        const unseen = config.solution.required_records.find(
-          (id) => !seenRecordIds.includes(id)
-        );
-        if (unseen && nq.requiredRecordHint[unseen])
-          nextQuestions.push(nq.requiredRecordHint[unseen]);
+        const unseen = config.solution.required_records.find((id) => !seenRecordIds.includes(id));
+        if (unseen && nq.requiredRecordHint[unseen]) nextQuestions.push(nq.requiredRecordHint[unseen]);
       }
-      if (nextQuestions.length < 2 && nq.crossCheck.length > 0) {
-        nextQuestions.push(nq.crossCheck[0]);
-      }
+      if (nextQuestions.length < 2 && nq.crossCheck.length > 0) nextQuestions.push(nq.crossCheck[0]);
     }
-    const finalNext = nextQuestions.slice(0, 2);
+    let finalNext = nextQuestions.slice(0, 2);
     if (finalNext.length === 0) {
-      finalNext.push("21:10~21:20 3층 CCTV 기록은?", "감사 관련 이메일 내용은?");
+      finalNext = ["21:10~21:20 3층 CCTV 기록은?", "감사 관련 이메일 내용은?"];
     }
 
     let message = "";
     if (grade === "A" && solved) {
-      message = "사건이 해결되었습니다. 축하합니다.";
+      message = "사건 해결. 제출한 결론은 사건 기록과 일치합니다.";
     } else if (grade === "A") {
-      message =
-        "범인·동기·방법을 잘 짚었으나, 정확한 인물·키워드가 일치하지 않습니다. 기록을 다시 확인해 보세요.";
+      message = "결론은 기록과 높은 정합성을 보입니다. 다만 핵심 인물 또는 연쇄를 한 번 더 점검해 보세요.";
     } else if (grade === "B") {
-      message =
-        "범인 지목은 있었으나, 동기나 방법이 부족합니다. 추가 조회를 권합니다.";
+      message = "가능성은 있지만 근거가 아직 덜 모였습니다.";
     } else {
-      message =
-        "결론 형식이 부족합니다. 범인, 동기, 방법을 구체적으로 제시해 주세요.";
+      message = "'누가/왜/어떻게'를 한 문장으로 정리해 주세요. 예: 'A가 B 때문에 C로 범행했다.'";
     }
 
-    let responseText = `[SYSTEM]
+    let responseText = `[REPORT]
+GRADE: ${grade}
+STATUS: ${solved ? "SOLVED" : "NOT_SOLVED"}
+
+[SYSTEM]
 MESSAGE: ${message}
 
 NEXT:

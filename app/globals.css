@@ -7,10 +7,13 @@
 @layer base {
   html {
     @apply antialiased;
+    height: 100%;
   }
 
   body {
     @apply min-h-screen bg-archive-bg text-archive-text font-serif;
+    height: 100%;
+    margin: 0;
   }
 
   ::selection {

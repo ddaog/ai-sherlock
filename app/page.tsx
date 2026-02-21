@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import type { Hypothesis } from "@/lib/hypothesesSimple";
 import { VICTIM_NAME } from "@/data/case.display";
 
-const SESSION_STORAGE_KEY = "case_session_state_v4";
+const SESSION_STORAGE_KEY = "case_session_state_v8";
 const MAX_HYPOTHESES = 5;
 
 function highlightVictim(text: string, victim: string) {
@@ -19,15 +19,6 @@ function highlightVictim(text: string, victim: string) {
       part
     )
   );
-}
-
-interface SessionState {
-  solved: boolean;
-  solvedAt?: string;
-  seenRecordIds: string[];
-  triggeredBadges: string[];
-  hypotheses: Hypothesis[];
-  pendingHypothesisReplace?: { newText: string; matchedHypothesisId: string };
 }
 
 function Typewriter({
@@ -87,19 +78,27 @@ interface Message {
   usage?: Usage;
 }
 
-function loadSessionState(): Partial<SessionState> | null {
+interface GameSessionState {
+  solved: boolean;
+  solvedAt?: string;
+  seenRecordIds: string[];
+  triggeredBadges: string[];
+  messages?: Message[];
+  hypotheses?: Hypothesis[];
+}
+
+function loadSessionState(): Partial<GameSessionState> | null {
   if (typeof window === "undefined") return null;
   try {
     const raw = localStorage.getItem(SESSION_STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<SessionState>;
-    return parsed;
+    return JSON.parse(raw) as Partial<GameSessionState>;
   } catch {
     return null;
   }
 }
 
-function saveSessionState(state: Partial<SessionState>) {
+function saveSessionState(state: Partial<GameSessionState>) {
   if (typeof window === "undefined") return;
   try {
     localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(state));
@@ -120,46 +119,49 @@ export default function Home() {
   const [pendingHypothesisReplace, setPendingHypothesisReplace] = useState<
     { newText: string; matchedHypothesisId: string } | undefined
   >(undefined);
+  const [pendingReset, setPendingReset] = useState(false);
   const [suggestionIndex, setSuggestionIndex] = useState(-1);
   const logEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     const saved = loadSessionState();
-    if (saved?.solved === true) {
-      setSolved(true);
+    if (saved) {
+      if (saved.solved === true) setSolved(true);
       if (saved.seenRecordIds) setSeenRecordIds(saved.seenRecordIds);
       if (saved.triggeredBadges) setTriggeredBadges(saved.triggeredBadges);
-      if (saved.hypotheses) setHypotheses(saved.hypotheses.slice(0, MAX_HYPOTHESES));
+      if (Array.isArray(saved.messages) && saved.messages.length > 0) setMessages(saved.messages);
+      if (Array.isArray(saved.hypotheses)) setHypotheses(saved.hypotheses.slice(0, MAX_HYPOTHESES));
     }
   }, []);
 
   useEffect(() => {
-    if (solved) {
-      saveSessionState({
-        solved: true,
-        solvedAt: new Date().toISOString(),
-        seenRecordIds,
-        triggeredBadges,
-        hypotheses,
-      });
-    }
-  }, [solved, seenRecordIds, triggeredBadges, hypotheses]);
+    saveSessionState({
+      solved,
+      solvedAt: solved ? new Date().toISOString() : undefined,
+      seenRecordIds,
+      triggeredBadges,
+      messages,
+      hypotheses,
+    });
+  }, [solved, seenRecordIds, triggeredBadges, messages, hypotheses]);
 
   const handleRestart = () => {
-    setInput("");
-    setMessages([]);
-    setHypotheses([]);
-    setSeenRecordIds([]);
-    setTriggeredBadges([]);
-    setSolved(false);
-    setPendingHypothesisReplace(undefined);
     saveSessionState({
       solved: false,
       seenRecordIds: [],
       triggeredBadges: [],
+      messages: [],
       hypotheses: [],
     });
+    setSolved(false);
+    setMessages([]);
+    setHypotheses([]);
+    setSeenRecordIds([]);
+    setTriggeredBadges([]);
+    setInput("");
+    setPendingHypothesisReplace(undefined);
+    setPendingReset(false);
     inputRef.current?.focus();
   };
 
@@ -173,9 +175,42 @@ export default function Home() {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  const lastAssistantIsResetConfirm = (() => {
+    const last = [...messages].reverse().find((m) => m.role === "assistant");
+    return last?.response?.includes("초기화를 진행할까요") ?? false;
+  })();
+
   const handleSubmit = async () => {
     const trimmed = input.trim();
-    if (!trimmed || loading) return;
+    if (!trimmed || loading || solved) return;
+
+    const isY = /^(y|yes|예|네|ㅇ)$/i.test(trimmed);
+    const isN = /^(n|no|아니오|아니요|ㄴ)$/i.test(trimmed);
+    const awaitingResetConfirm = pendingReset || (lastAssistantIsResetConfirm && (isY || isN));
+
+    // 가설 덮어쓰기 확인 중이면 Y/N을 API로 보냄. 초기화 확인과 구분.
+    if (awaitingResetConfirm && !pendingHypothesisReplace && (isY || isN)) {
+      if (isY) {
+        handleRestart();
+      } else {
+        setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
+        setMessages((prev) => [...prev, { role: "assistant", response: "취소되었습니다." }]);
+      }
+      setPendingReset(false);
+      setInput("");
+      return;
+    }
+
+    if (/^\/초기화$/i.test(trimmed)) {
+      setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", response: "초기화를 진행할까요? localStorage 데이터가 삭제됩니다. (Y: 실행, N: 취소)" },
+      ]);
+      setPendingReset(true);
+      setInput("");
+      return;
+    }
 
     setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
     setInput("");
@@ -209,6 +244,7 @@ export default function Home() {
           triggeredBadges,
           sessionState: {
             solved,
+            solvedAt: solved ? new Date().toISOString() : undefined,
             ...(pendingHypothesisReplace && { pendingHypothesisReplace }),
           },
         }),
@@ -272,7 +308,13 @@ export default function Home() {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // "/" 입력 시 상위 핸들러(예: Cursor 슬래시 명령)가 가로채지 않도록 전파 차단
+    if (e.key === "/") {
+      e.stopPropagation();
+    }
     if (e.key === "Enter" && !e.shiftKey) {
+      // IME 조합 중(한글 등)에는 Enter를 가로채지 않음
+      if (e.nativeEvent.isComposing) return;
       e.preventDefault();
       handleSubmit();
       return;
@@ -346,6 +388,14 @@ export default function Home() {
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto px-6 py-6 space-y-8 z-10 relative scroll-smooth">
+          {messages.length === 0 && (
+            <div className="text-archive-muted text-[13px] font-serif space-y-3 pb-6">
+              <p className="font-mono text-archive-accent text-[11px] tracking-widest uppercase mb-4">[플레이 방법]</p>
+              <p><span className="font-mono text-archive-accent">/가설</span> 가설 기록. 예: /가설 박지훈이 범인인 것 같아</p>
+              <p><span className="font-mono text-archive-accent">/추리</span> 결론 제출. 예: /추리 박지훈이 비자금 때문에 약물로 범행했다</p>
+              <p><span className="font-mono text-archive-accent">/초기화</span> localStorage 삭제 후 게임 다시 시작 (Y/N 확인)</p>
+            </div>
+          )}
           {messages.map((msg, i) => (
             <div
               key={i}
@@ -445,7 +495,7 @@ export default function Home() {
                   setSuggestionIndex(-1);
                 }}
                 onKeyDown={handleKeyDown}
-                placeholder="질문하세요. 가설 기록: /가설 박지훈이 범인인 것 같아"
+                placeholder="질문하세요. 결론: /추리 [범인]. [동기]. [수법]"
                 className="flex-1 min-h-[52px] max-h-32 px-5 py-3.5 rounded-sm bg-black/60 border border-archive-border text-archive-text placeholder-archive-muted-deep focus:outline-none focus:border-archive-accent focus:ring-1 focus:ring-archive-accent/50 resize-none text-[16px] font-serif transition-colors shadow-inner"
                 rows={1}
                 disabled={loading}
