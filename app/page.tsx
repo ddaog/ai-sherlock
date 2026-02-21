@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import type { Hypothesis } from "@/lib/hypothesesSimple";
 import { VICTIM_NAME } from "@/data/case.display";
+import { trackActivationClaimHint, trackUserMessage } from "@/lib/analytics";
 
 const SESSION_STORAGE_KEY = "case_session_state_v9";
 const MAX_HYPOTHESES = 5;
@@ -241,6 +242,7 @@ export default function Home() {
 
     // 가설 덮어쓰기 확인 중이면 Y/N을 API로 보냄. 초기화 확인과 구분.
     if (awaitingResetConfirm && !pendingHypothesisReplace && (isY || isN)) {
+      trackUserMessage(trimmed);
       if (isY) {
         handleRestart();
       } else {
@@ -253,6 +255,7 @@ export default function Home() {
     }
 
     if (/^\/초기화$/i.test(trimmed)) {
+      trackUserMessage(trimmed);
       setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
       setMessages((prev) => [
         ...prev,
@@ -263,6 +266,7 @@ export default function Home() {
       return;
     }
 
+    trackUserMessage(trimmed);
     setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
     setShowCommandPalette(false);
     setInput("");
@@ -329,7 +333,13 @@ export default function Home() {
       if (Array.isArray(data.triggeredBadges)) setTriggeredBadges(data.triggeredBadges);
       if (data.solved === true) setSolved(true);
       setPendingHypothesisReplace(data.sessionState?.pendingHypothesisReplace);
-      if (typeof data.sessionState?.hintCount === "number") setHintCount(data.sessionState.hintCount);
+      if (typeof data.sessionState?.hintCount === "number") {
+        const newHintCount = data.sessionState.hintCount;
+        if (newHintCount === 1 && /^\/힌트$/i.test(trimmed)) {
+          trackActivationClaimHint();
+        }
+        setHintCount(newHintCount);
+      }
 
       setMessages((prev) => [
         ...prev,
