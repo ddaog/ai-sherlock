@@ -14,17 +14,7 @@ const DELETE_PATTERNS = [
   /접자/i,
 ];
 
-const HYPOTHESIS_PATTERNS = [
-  /같아/i,
-  /아닐까/i,
-  /일\s*수도/i,
-  /가능성/i,
-  /의심/i,
-  /추정/i,
-  /정황/i,
-  /내\s*생각/i,
-  /결론/i,
-];
+const HYPOTHESIS_PREFIX = /^\/가설\s+/i;
 
 const CONFLICT_PATTERNS = [
   /충돌/i,
@@ -37,19 +27,21 @@ export function detectDeleteIntent(query: string): boolean {
   return DELETE_PATTERNS.some((p) => p.test(query.trim()));
 }
 
+/** '/가설'로 시작하면 가설 입력으로 인식 */
 export function detectHypothesisIntent(query: string): boolean {
-  return HYPOTHESIS_PATTERNS.some((p) => p.test(query.trim()));
+  return HYPOTHESIS_PREFIX.test(query.trim());
+}
+
+/** '/가설' 뒤의 텍스트만 추출 (없으면 null) */
+export function extractHypothesisFromQuery(query: string): string | null {
+  const trimmed = query.trim();
+  if (!HYPOTHESIS_PREFIX.test(trimmed)) return null;
+  const text = trimmed.replace(HYPOTHESIS_PREFIX, "").trim();
+  return text.length > 0 ? text.slice(0, 120) : null;
 }
 
 export function detectConflictIntent(query: string): boolean {
   return CONFLICT_PATTERNS.some((p) => p.test(query.trim()));
-}
-
-export function extractHypothesisFromLLM(text: string): string | null {
-  const match = text.match(/<BEGIN_HYPOTHESIS>\s*([\s\S]+?)\s*<END_HYPOTHESIS>/i);
-  if (!match) return null;
-  const extracted = match[1].trim();
-  return extracted.length > 0 && extracted.length <= 120 ? extracted : null;
 }
 
 export function parseRecordIdsFromLLM(text: string): string[] {
@@ -86,14 +78,25 @@ function tokenOverlapRatio(a: Set<string>, b: Set<string>): number {
 }
 
 export function dedupeHypotheses(list: Hypothesis[], newText: string): boolean {
+  return findMatchingHypothesis(list, newText) !== null;
+}
+
+/** 50% 이상 유사한 기존 가설 반환 (없으면 null) */
+export function findMatchingHypothesis(
+  list: Hypothesis[],
+  newText: string
+): Hypothesis | null {
   const newTokens = tokenize(newText);
+  let best: Hypothesis | null = null;
+  let bestRatio = 0.5;
   for (const h of list) {
-    const existingTokens = tokenize(h.text);
-    if (tokenOverlapRatio(newTokens, existingTokens) >= 0.5) {
-      return true;
+    const ratio = tokenOverlapRatio(newTokens, tokenize(h.text));
+    if (ratio >= bestRatio) {
+      bestRatio = ratio;
+      best = h;
     }
   }
-  return false;
+  return best;
 }
 
 export function deleteBestMatch(list: Hypothesis[], query: string): Hypothesis[] {

@@ -2,8 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   validateQuery,
   isAnswerRequest,
-  isConclusionSubmission,
-  isHypothesis,
 } from "@/lib/guardrails";
 import { getTopKEvidence } from "@/lib/embeddings";
 import { chatCompletion } from "@/lib/openai";
@@ -11,15 +9,18 @@ import {
   type Hypothesis,
   detectDeleteIntent,
   detectHypothesisIntent,
-  detectConflictIntent,
-  extractHypothesisFromLLM,
+  extractHypothesisFromQuery,
   parseRecordIdsFromLLM,
-  dedupeHypotheses,
+  findMatchingHypothesis,
   deleteBestMatch,
   nextHypothesisId,
 } from "@/lib/hypothesesSimple";
 import { evaluateBadges } from "@/lib/badgeEngine";
 import { loadEvidenceSync } from "@/lib/embeddings";
+import { CASE_CONFIG } from "@/data/case.config";
+import { detectSubmission } from "@/lib/submissionDetector";
+import { parseSubmission } from "@/lib/submissionParser";
+import { gradeSubmission, isSolved } from "@/lib/grader";
 
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT_MAX = 15;
@@ -57,20 +58,23 @@ const SYSTEM_PROMPT = `당신은 "사건 기록 시스템 v1.4(Evidence Archive 
 
 ## 반드시 수행
 1. RETRIEVED_EVIDENCE에서 관련 기록 1~3개를 골라, 그 내용을 질문에 답하는 문장으로 재구성하세요.
-2. 유저가 가설을 말하면 "가설로 기록했습니다: <요약>" 한 줄을 포함하세요. 힌트나 정답 방향으로 유도하지 마세요.
-3. SUGGESTION에 다음에 확인해볼 만한 질문 2~3개를 제시하세요.
+2. SUGGESTION에 다음에 확인해볼 만한 질문 2~3개를 제시하세요.
 
 ## 출력 포맷 (엄수)
 RESPONSE: <질문에 대한 답변. 2~5문장. 기록 내용을 자연스럽게 인용. 판정/추리 없이 사실만>
 SOURCES: [기록 021], [기록 007]  (인용한 기록 id만, 없으면 생략 가능)
-(유저가 가설을 말했을 때만, 아래 블록을 출력. 가설이 아니면 이 블록을 출력하지 마세요)
-<BEGIN_HYPOTHESIS>
-<가설 한 줄 요약, 120자 이내>
-<END_HYPOTHESIS>
+HYPOTHESIS_IMPACT: H1:support, H2:conflict  (가설이 있을 때만. 해당 없으면 (none))
 SUGGESTION:
 - <다음 질문 후보 1>
 - <다음 질문 후보 2>
 - <다음 질문 후보 3>
+
+## HYPOTHESIS_IMPACT 상세
+CURRENT_HYPOTHESES에 나열된 가설 중, 이번 인용 기록(SOURCES)이 **지지(support)** 하거나 **충돌(conflict)** 하는 가설이 있으면 반드시 아래 형식으로 적으세요.
+- support: 기록이 해당 가설을 뒷받침함 (예: "박지훈이 범인" + 박지훈의 수상한 행적)
+- conflict: 기록이 해당 가설과 모순됨 (예: "박지훈이 범인" + 박지훈의 확실한 알리바이)
+형식: HYPOTHESIS_IMPACT: H1:support, H2:conflict
+해당 없으면: HYPOTHESIS_IMPACT: (none)
 
 ## 오프토픽 질문 시
 RESPONSE: 사건 기록에 해당 요소는 등장하지 않습니다.
@@ -105,6 +109,11 @@ export async function POST(req: NextRequest) {
     hypotheses?: Hypothesis[];
     seenRecordIds?: string[];
     triggeredBadges?: string[];
+    sessionState?: {
+      solved?: boolean;
+      solvedAt?: string;
+      pendingHypothesisReplace?: { newText: string; matchedHypothesisId: string };
+    };
   };
   try {
     body = await req.json();
@@ -118,7 +127,22 @@ export async function POST(req: NextRequest) {
     hypotheses: incomingHypotheses = [],
     seenRecordIds: incomingSeenIds = [],
     triggeredBadges: incomingTriggered = [],
+    sessionState: incomingSession = {},
   } = body;
+
+  if (incomingSession?.solved === true) {
+    return NextResponse.json({
+      response: "이미 종결된 사건입니다. '다시 시작'을 눌러주세요.",
+      sources: [],
+      suggestions: [],
+      hypotheses: [],
+      seenRecordIds: incomingSeenIds ?? [],
+      triggeredBadges: incomingTriggered ?? [],
+      solved: true,
+      sessionState: { solved: true, solvedAt: incomingSession.solvedAt },
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+    });
+  }
   const seenRecordIds = Array.isArray(incomingSeenIds) ? [...incomingSeenIds] : [];
   let triggeredBadges = Array.isArray(incomingTriggered) ? [...incomingTriggered] : [];
   let hypotheses: Hypothesis[] = [];
@@ -138,10 +162,84 @@ export async function POST(req: NextRequest) {
         text: String(h.text).slice(0, 120),
         support: Math.max(0, Number(h.support)),
         conflict: Math.max(0, Number(h.conflict)),
-      }));
+      }))
+      .slice(0, MAX_HYPOTHESES);
   }
   if (!query || typeof query !== "string") {
     return NextResponse.json({ error: "query is required" }, { status: 400 });
+  }
+
+  const pendingReplace = incomingSession?.pendingHypothesisReplace;
+  const isConfirmReplace = /^(y|yes|예|네|ㅇ)$/i.test(query.trim());
+  const isRejectReplace = /^(n|no|아니오|아니요|ㄴ)$/i.test(query.trim());
+
+  if (pendingReplace && (isConfirmReplace || isRejectReplace)) {
+    if (isConfirmReplace) {
+      hypotheses = hypotheses
+        .map((h) =>
+          h.id === pendingReplace.matchedHypothesisId
+            ? { ...h, text: pendingReplace.newText.slice(0, 120) }
+            : h
+        )
+        .slice(0, MAX_HYPOTHESES);
+      const noteText =
+        pendingReplace.newText.length > 80
+          ? pendingReplace.newText.slice(0, 80) + "..."
+          : pendingReplace.newText;
+      return NextResponse.json({
+        response: `기존 가설을 변경했습니다: "${noteText}"`,
+        sources: [],
+        suggestions: [
+          "7월 18일 당시 별관 출입 기록은?",
+          "해당 가설을 뒷받침하는 기록은?",
+        ],
+        hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
+        seenRecordIds,
+        triggeredBadges,
+        solved: false,
+        sessionState: { solved: false },
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+      });
+    } else {
+      if (hypotheses.length >= MAX_HYPOTHESES) {
+        return NextResponse.json({
+          response: "가설은 최대 5개까지입니다. 기존 가설을 삭제한 뒤 새로 기록해 주세요.",
+          sources: [],
+          suggestions: ["/삭제 (가설 삭제)", "해당 가설을 뒷받침하는 기록은?"],
+          hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
+          seenRecordIds,
+          triggeredBadges,
+          solved: false,
+          sessionState: { solved: false },
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+        });
+      }
+      const newHyp: Hypothesis = {
+        id: nextHypothesisId(hypotheses),
+        text: pendingReplace.newText.slice(0, 120),
+        support: 0,
+        conflict: 0,
+      };
+      hypotheses = [...hypotheses, newHyp].slice(-MAX_HYPOTHESES);
+      const noteText =
+        pendingReplace.newText.length > 80
+          ? pendingReplace.newText.slice(0, 80) + "..."
+          : pendingReplace.newText;
+      return NextResponse.json({
+        response: `가설로 새로 기록했습니다: "${noteText}"`,
+        sources: [],
+        suggestions: [
+          "7월 18일 당시 별관 출입 기록은?",
+          "해당 가설을 뒷받침하는 기록은?",
+        ],
+        hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
+        seenRecordIds,
+        triggeredBadges,
+        solved: false,
+        sessionState: { solved: false },
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+      });
+    }
   }
 
   const guard = validateQuery(query);
@@ -154,9 +252,11 @@ export async function POST(req: NextRequest) {
         "피해자 김도윤과 관련된 인물은?",
         "CCTV 기록에서 확인된 시간대는?",
       ],
-      hypotheses: hypotheses.slice(0, 5),
+      hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
       seenRecordIds,
       triggeredBadges,
+      solved: false,
+      sessionState: { solved: false },
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
     });
   }
@@ -171,9 +271,86 @@ export async function POST(req: NextRequest) {
         "다른 가설을 세워 보시겠어요?",
         "CCTV 기록에서 확인된 시간대는?",
       ],
-      hypotheses: hypotheses.slice(0, 5),
+      hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
       seenRecordIds,
       triggeredBadges,
+      solved: false,
+      sessionState: { solved: false },
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+    });
+  }
+
+  if (detectHypothesisIntent(query)) {
+    const hypothesisText = extractHypothesisFromQuery(query);
+    if (!hypothesisText) {
+      return NextResponse.json({
+        response: "가설 내용을 입력해 주세요. 예: /가설 박지훈이 범인인 것 같아",
+        sources: [],
+        suggestions: [
+          "7월 18일 당시 별관 출입 기록은?",
+          "피해자 김도윤과 관련된 인물은?",
+        ],
+        hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
+        seenRecordIds,
+        triggeredBadges,
+        solved: false,
+        sessionState: { solved: false },
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+      });
+    }
+    if (hypotheses.length >= MAX_HYPOTHESES) {
+      return NextResponse.json({
+        response: "가설은 최대 5개까지입니다. 기존 가설을 삭제하거나 변경해 주세요.",
+        sources: [],
+        suggestions: ["/삭제 (가설 삭제)", "7월 18일 당시 별관 출입 기록은?"],
+        hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
+        seenRecordIds,
+        triggeredBadges,
+        solved: false,
+        sessionState: { solved: false },
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+      });
+    }
+    const matched = findMatchingHypothesis(hypotheses, hypothesisText);
+    if (matched) {
+      return NextResponse.json({
+        response: `기존 가설 [${matched.id}: ${matched.text}]과 유사합니다. 기존 가설을 변경할까요? (Y: 변경, N: 새로 기록)`,
+        sources: [],
+        suggestions: ["Y", "N"],
+        hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
+        seenRecordIds,
+        triggeredBadges,
+        solved: false,
+        sessionState: {
+          solved: false,
+          pendingHypothesisReplace: {
+            newText: hypothesisText,
+            matchedHypothesisId: matched.id,
+          },
+        },
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+      });
+    }
+    const newHyp: Hypothesis = {
+      id: nextHypothesisId(hypotheses),
+      text: hypothesisText,
+      support: 0,
+      conflict: 0,
+    };
+    hypotheses = [...hypotheses, newHyp].slice(-MAX_HYPOTHESES);
+    const noteText = hypothesisText.length > 80 ? hypothesisText.slice(0, 80) + "..." : hypothesisText;
+    return NextResponse.json({
+      response: `가설로 기록했습니다: "${noteText}"`,
+      sources: [],
+      suggestions: [
+        "7월 18일 당시 별관 출입 기록은?",
+        "해당 가설을 뒷받침하는 기록은?",
+      ],
+      hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
+      seenRecordIds,
+      triggeredBadges,
+      solved: false,
+      sessionState: { solved: false },
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
     });
   }
@@ -188,9 +365,93 @@ export async function POST(req: NextRequest) {
         "박지훈의 7월 18일 행적은?",
         "감사 관련 이메일 내용은?",
       ],
-      hypotheses: hypotheses.slice(0, 5),
+      hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
       seenRecordIds,
       triggeredBadges,
+      solved: false,
+      sessionState: { solved: false },
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+    });
+  }
+
+  const config = CASE_CONFIG;
+  const { submission: isSubmission } = detectSubmission(query, config.submission);
+
+  if (isSubmission) {
+    const parse = parseSubmission(query, config, config.solution);
+    const requiredSeen = config.solution.required_records.filter((id) =>
+      seenRecordIds.includes(id)
+    );
+    const required_ratio =
+      config.solution.required_records.length > 0
+        ? requiredSeen.length / config.solution.required_records.length
+        : 1;
+    const grade = gradeSubmission(parse, required_ratio);
+    const solved = isSolved(grade, query, parse, config.solution);
+
+    const nextQuestions: string[] = [];
+    const nq = config.nextQuestions;
+    if (nq) {
+      if (!parse.hasMotive && nq.motive.length > 0)
+        nextQuestions.push(nq.motive[0]);
+      if (!parse.hasMethod && nq.method.length > 0)
+        nextQuestions.push(nq.method[0]);
+      if (required_ratio < 0.66) {
+        const unseen = config.solution.required_records.find(
+          (id) => !seenRecordIds.includes(id)
+        );
+        if (unseen && nq.requiredRecordHint[unseen])
+          nextQuestions.push(nq.requiredRecordHint[unseen]);
+      }
+      if (nextQuestions.length < 2 && nq.crossCheck.length > 0) {
+        nextQuestions.push(nq.crossCheck[0]);
+      }
+    }
+    const finalNext = nextQuestions.slice(0, 2);
+    if (finalNext.length === 0) {
+      finalNext.push("21:10~21:20 3층 CCTV 기록은?", "감사 관련 이메일 내용은?");
+    }
+
+    let message = "";
+    if (grade === "A" && solved) {
+      message = "사건이 해결되었습니다. 축하합니다.";
+    } else if (grade === "A") {
+      message =
+        "범인·동기·방법을 잘 짚었으나, 정확한 인물·키워드가 일치하지 않습니다. 기록을 다시 확인해 보세요.";
+    } else if (grade === "B") {
+      message =
+        "범인 지목은 있었으나, 동기나 방법이 부족합니다. 추가 조회를 권합니다.";
+    } else {
+      message =
+        "결론 형식이 부족합니다. 범인, 동기, 방법을 구체적으로 제시해 주세요.";
+    }
+
+    let responseText = `[SYSTEM]
+MESSAGE: ${message}
+
+NEXT:
+${finalNext.map((q) => `- ${q}`).join("\n")}`;
+
+    if (solved) {
+      responseText += `
+
+[END_LOG]
+${config.ending.solvedTitle}
+${config.ending.solvedSummaryLines.map((l) => `- ${l}`).join("\n")}
+${config.ending.closedLine}`;
+    }
+
+    return NextResponse.json({
+      response: responseText,
+      sources: [],
+      suggestions: finalNext,
+      hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
+      seenRecordIds,
+      triggeredBadges,
+      solved,
+      sessionState: solved
+        ? { solved: true, solvedAt: new Date().toISOString() }
+        : { solved: false },
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
     });
   }
@@ -204,14 +465,17 @@ export async function POST(req: NextRequest) {
       )
       .join("\n\n");
 
+    const hypothesesBlock =
+      hypotheses.length > 0
+        ? `\nCURRENT_HYPOTHESES:\n${hypotheses.map((h) => `- ${h.id}: ${h.text}`).join("\n")}\n`
+        : "";
+
     const userMessage = `RETRIEVED_EVIDENCE:
 ${context}
-
----
+${hypothesesBlock}---
 USER QUERY: ${query}
 
-위 기록을 바탕으로 질문에 직접 답하는 RESPONSE를 작성하세요. 기록 내용을 문장에 자연스럽게 녹여 넣고, SOURCES에 인용한 기록 id를 적으세요. 가설 표현이 있으면 "가설로 기록했습니다"를 RESPONSE에 포함하세요.
-${detectHypothesisIntent(query) ? "유저가 가설을 말했으므로, <BEGIN_HYPOTHESIS>...</END_HYPOTHESIS> 블록에 가설 한 줄 요약(120자 이내)을 반드시 출력하세요." : ""}`;
+위 기록을 바탕으로 질문에 직접 답하는 RESPONSE를 작성하세요. 기록 내용을 문장에 자연스럽게 녹여 넣고, SOURCES에 인용한 기록 id를 적으세요.${hypotheses.length > 0 ? " 가설이 있으면 반드시 HYPOTHESIS_IMPACT를 출력하세요. 인용 기록이 가설을 지지하면 support, 모순되면 conflict로 표기." : ""}`;
 
     const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
       { role: "system", content: SYSTEM_PROMPT },
@@ -246,47 +510,29 @@ ${detectHypothesisIntent(query) ? "유저가 가설을 말했으므로, <BEGIN_H
                 "김도윤과 관련된 인물들의 행적은?",
                 "감사 예정일과 관련된 서류는?",
               ],
-        hypotheses: hypotheses.slice(0, 5),
+        hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
         seenRecordIds,
         triggeredBadges,
+        solved: false,
+        sessionState: { solved: false },
         usage: buildUsage(embeddingUsage, chatResult.usage),
       });
     }
 
     const rawLLM = chatResult.content;
     const recordIds = parseRecordIdsFromLLM(rawLLM);
-    let hypothesisText = extractHypothesisFromLLM(rawLLM);
-    if (!hypothesisText && detectHypothesisIntent(query)) {
-      hypothesisText = query.trim().slice(0, 120);
-    }
 
-    if (detectConflictIntent(query) && hypotheses.length > 0) {
-      const last = hypotheses[hypotheses.length - 1];
-      hypotheses = hypotheses.map((h) =>
-        h.id === last.id ? { ...h, conflict: h.conflict + 1 } : h
-      );
-    }
-
-    if (hypothesisText && !dedupeHypotheses(hypotheses, hypothesisText)) {
-      const supportCount = Math.min(recordIds.length || 1, 3);
-      const newHyp: Hypothesis = {
-        id: nextHypothesisId(hypotheses),
-        text: hypothesisText.slice(0, 120),
-        support: supportCount,
-        conflict: 0,
-      };
-      hypotheses = [...hypotheses, newHyp].slice(-5);
-    }
-
-    if (isHypothesis(query) && !parsed.response?.includes("가설로 기록")) {
-      const hypothesisNote = `가설로 기록했습니다: "${(hypothesisText || query).slice(0, 80)}${(hypothesisText || query).length > 80 ? "..." : ""}" `;
-      parsed.response = hypothesisNote + (parsed.response || "");
-    }
-
-    if (isConclusionSubmission(query)) {
-      parsed.response =
-        (parsed.response || "") +
-        " 근거 확인을 위해 아래 기록을 추가로 조회해 보시기 바랍니다.";
+    const hypothesisImpact = parseHypothesisImpact(rawLLM, hypotheses);
+    if (hypothesisImpact.length > 0) {
+      hypotheses = hypotheses.map((h) => {
+        const impact = hypothesisImpact.find((i) => i.hypothesisId === h.id);
+        if (!impact) return h;
+        return {
+          ...h,
+          support: h.support + (impact.impact === "support" ? 1 : 0),
+          conflict: h.conflict + (impact.impact === "conflict" ? 1 : 0),
+        };
+      });
     }
 
     const currentTurnRecordIds = recordIds;
@@ -321,15 +567,17 @@ ${detectHypothesisIntent(query) ? "유저가 가설을 말했으므로, <BEGIN_H
       badge,
       sources: parsed.sources,
       suggestions: parsed.suggestions,
-      hypotheses: hypotheses.slice(0, 5),
+      hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
       seenRecordIds: newSeenIds,
       triggeredBadges,
+      solved: false,
+      sessionState: { solved: false },
       usage: buildUsage(embeddingUsage, chatResult.usage),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown";
     console.error("Query error:", message);
-    const errHypotheses = Array.isArray(body?.hypotheses) ? body.hypotheses.slice(0, 5) : [];
+    const errHypotheses = Array.isArray(body?.hypotheses) ? body.hypotheses.slice(0, MAX_HYPOTHESES) : [];
     const errSeen = Array.isArray(body?.seenRecordIds) ? body.seenRecordIds : [];
     const errTriggered = Array.isArray(body?.triggeredBadges) ? body.triggeredBadges : [];
     return NextResponse.json(
@@ -338,6 +586,8 @@ ${detectHypothesisIntent(query) ? "유저가 가설을 말했으므로, <BEGIN_H
         hypotheses: errHypotheses,
         seenRecordIds: errSeen,
         triggeredBadges: errTriggered,
+        solved: false,
+        sessionState: { solved: false },
       },
       { status: 500 }
     );
@@ -369,6 +619,34 @@ function buildUsage(
     costUsd: Math.round(costUsd * 1_000_000) / 1_000_000,
     costKrw,
   };
+}
+
+const MAX_HYPOTHESES = 5;
+
+function parseHypothesisImpact(
+  text: string,
+  hypotheses: Hypothesis[]
+): { hypothesisId: string; impact: "support" | "conflict" }[] {
+  if (hypotheses.length === 0) return [];
+  const idMap = new Map<string, string>();
+  for (const h of hypotheses) {
+    idMap.set(h.id.toUpperCase(), h.id);
+  }
+  const match = text.match(/HYPOTHESIS_IMPACT:\s*([^\n]+)/i);
+  if (!match) return [];
+  const raw = match[1].trim();
+  if (/\(none\)|없음|해당\s*없/i.test(raw)) return [];
+  const parsed: { hypothesisId: string; impact: "support" | "conflict" }[] = [];
+  const parts = raw.split(/[,;]\s*/).map((p) => p.trim());
+  for (const part of parts) {
+    const m = part.match(/^(H\d+)\s*:\s*(support|conflict|지지|충돌)$/i);
+    if (!m) continue;
+    const canonicalId = idMap.get(m[1].toUpperCase());
+    if (!canonicalId) continue;
+    const impact = /support|지지/i.test(m[2]) ? "support" : "conflict";
+    parsed.push({ hypothesisId: canonicalId, impact });
+  }
+  return parsed;
 }
 
 function parseResponse(text: string): {

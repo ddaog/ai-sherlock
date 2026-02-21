@@ -2,8 +2,43 @@
 
 import { useState, useRef, useEffect } from "react";
 import type { Hypothesis } from "@/lib/hypothesesSimple";
+import { VICTIM_NAME } from "@/data/case.display";
 
-function Typewriter({ text, onType }: { text: string; onType?: () => void }) {
+const SESSION_STORAGE_KEY = "case_session_state_v4";
+const MAX_HYPOTHESES = 5;
+
+function highlightVictim(text: string, victim: string) {
+  if (!victim) return text;
+  const parts = text.split(new RegExp(`(${victim})`, "g"));
+  return parts.map((part, i) =>
+    part === victim ? (
+      <span key={i} className="text-archive-accent font-semibold">
+        {part}
+      </span>
+    ) : (
+      part
+    )
+  );
+}
+
+interface SessionState {
+  solved: boolean;
+  solvedAt?: string;
+  seenRecordIds: string[];
+  triggeredBadges: string[];
+  hypotheses: Hypothesis[];
+  pendingHypothesisReplace?: { newText: string; matchedHypothesisId: string };
+}
+
+function Typewriter({
+  text,
+  onType,
+  victim,
+}: {
+  text: string;
+  onType?: () => void;
+  victim?: string;
+}) {
   const [displayedText, setDisplayedText] = useState("");
   const onTypeRef = useRef(onType);
 
@@ -25,7 +60,7 @@ function Typewriter({ text, onType }: { text: string; onType?: () => void }) {
 
   return (
     <>
-      {displayedText}
+      {victim ? highlightVictim(displayedText, victim) : displayedText}
       {displayedText.length < text.length && (
         <span className="inline-block w-2 h-4 bg-archive-accent ml-1 -mb-0.5 align-baseline animate-pulse"></span>
       )}
@@ -52,6 +87,27 @@ interface Message {
   usage?: Usage;
 }
 
+function loadSessionState(): Partial<SessionState> | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SessionState>;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveSessionState(state: Partial<SessionState>) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // ignore
+  }
+}
+
 export default function Home() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -60,9 +116,52 @@ export default function Home() {
   const [hypotheses, setHypotheses] = useState<Hypothesis[]>([]);
   const [seenRecordIds, setSeenRecordIds] = useState<string[]>([]);
   const [triggeredBadges, setTriggeredBadges] = useState<string[]>([]);
+  const [solved, setSolved] = useState(false);
+  const [pendingHypothesisReplace, setPendingHypothesisReplace] = useState<
+    { newText: string; matchedHypothesisId: string } | undefined
+  >(undefined);
   const [suggestionIndex, setSuggestionIndex] = useState(-1);
   const logEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const saved = loadSessionState();
+    if (saved?.solved === true) {
+      setSolved(true);
+      if (saved.seenRecordIds) setSeenRecordIds(saved.seenRecordIds);
+      if (saved.triggeredBadges) setTriggeredBadges(saved.triggeredBadges);
+      if (saved.hypotheses) setHypotheses(saved.hypotheses.slice(0, MAX_HYPOTHESES));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (solved) {
+      saveSessionState({
+        solved: true,
+        solvedAt: new Date().toISOString(),
+        seenRecordIds,
+        triggeredBadges,
+        hypotheses,
+      });
+    }
+  }, [solved, seenRecordIds, triggeredBadges, hypotheses]);
+
+  const handleRestart = () => {
+    setInput("");
+    setMessages([]);
+    setHypotheses([]);
+    setSeenRecordIds([]);
+    setTriggeredBadges([]);
+    setSolved(false);
+    setPendingHypothesisReplace(undefined);
+    saveSessionState({
+      solved: false,
+      seenRecordIds: [],
+      triggeredBadges: [],
+      hypotheses: [],
+    });
+    inputRef.current?.focus();
+  };
 
   const lastSuggestions =
     [...messages]
@@ -108,13 +207,17 @@ export default function Home() {
           hypotheses,
           seenRecordIds,
           triggeredBadges,
+          sessionState: {
+            solved,
+            ...(pendingHypothesisReplace && { pendingHypothesisReplace }),
+          },
         }),
       });
 
       const data = await res.json();
 
       if (!res.ok) {
-        if (Array.isArray(data.hypotheses)) setHypotheses(data.hypotheses);
+        if (Array.isArray(data.hypotheses)) setHypotheses(data.hypotheses.slice(0, MAX_HYPOTHESES));
         if (Array.isArray(data.seenRecordIds)) setSeenRecordIds(data.seenRecordIds);
         if (Array.isArray(data.triggeredBadges)) setTriggeredBadges(data.triggeredBadges);
         setMessages((prev) => [
@@ -132,9 +235,11 @@ export default function Home() {
         return;
       }
 
-      if (Array.isArray(data.hypotheses)) setHypotheses(data.hypotheses);
+      if (Array.isArray(data.hypotheses)) setHypotheses(data.hypotheses.slice(0, MAX_HYPOTHESES));
       if (Array.isArray(data.seenRecordIds)) setSeenRecordIds(data.seenRecordIds);
       if (Array.isArray(data.triggeredBadges)) setTriggeredBadges(data.triggeredBadges);
+      if (data.solved === true) setSolved(true);
+      setPendingHypothesisReplace(data.sessionState?.pendingHypothesisReplace);
 
       setMessages((prev) => [
         ...prev,
@@ -213,7 +318,7 @@ export default function Home() {
                 <li key={h.id} className="text-[13px] flex items-start gap-1.5">
                   <span className="text-archive-muted shrink-0 mt-0.5">-</span>
                   <span>
-                    <span className="font-bold mr-1">{h.id}</span> {h.text}
+                    <span className="font-bold mr-1">{h.id}</span> {highlightVictim(h.text, VICTIM_NAME)}
                     <span className="text-archive-muted-deep ml-1.5 text-[11px] font-mono tracking-tight">
                       (지지 {h.support} / 충돌 {h.conflict})
                     </span>
@@ -231,11 +336,16 @@ export default function Home() {
           </p>
           <div className="pt-2 mt-2 border-t border-archive-border border-dashed text-archive-text bg-black/40 px-3 py-2 rounded-sm shadow-inner text-[12px]">
             <p className="font-bold mb-1.5 font-mono text-archive-accent text-[10px] tracking-widest uppercase">[SYNOPSIS]</p>
-            <p className="leading-normal">7월 18일 밤, 회사 별관 3층에서 CFO 김도윤이 의식불명 상태로 발견되었다. 외부 침입 흔적은 없으며, 당시 출입 인원은 총 7명. (다음날 내부 감사 예정)</p>
+            <p className="leading-normal">
+              {highlightVictim(
+                "7월 18일 밤, 회사 별관 3층에서 CFO 김도윤이 의식불명 상태로 발견되었다. 외부 침입 흔적은 없으며, 당시 출입 인원은 총 7명. (다음날 내부 감사 예정)",
+                VICTIM_NAME
+              )}
+            </p>
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-6 py-6 space-y-8 z-10 relative scroll-smooth">
+        <div className="flex-1 min-h-0 overflow-y-auto px-6 py-6 space-y-8 z-10 relative scroll-smooth">
           {messages.map((msg, i) => (
             <div
               key={i}
@@ -250,7 +360,9 @@ export default function Home() {
                 }
               >
                 {msg.role === "user" ? (
-                  <p className="text-[16px] text-archive-text font-serif leading-relaxed tracking-wide">{msg.content}</p>
+                  <p className="text-[16px] text-archive-text font-serif leading-relaxed tracking-wide">
+                    {highlightVictim(msg.content ?? "", VICTIM_NAME)}
+                  </p>
                 ) : (
                   <div className="space-y-5 text-[16px] font-serif">
                     {msg.response && (
@@ -259,16 +371,17 @@ export default function Home() {
                           <Typewriter
                             text={msg.response}
                             onType={() => logEndRef.current?.scrollIntoView({ behavior: "auto" })}
+                            victim={VICTIM_NAME}
                           />
                         ) : (
-                          msg.response
+                          highlightVictim(msg.response, VICTIM_NAME)
                         )}
                       </div>
                     )}
                     {msg.badge && (
                       <div className="px-5 py-3 mt-4 rounded-md bg-archive-accent/10 border border-archive-accent/30">
                         <p className="font-mono text-[13px] font-semibold text-archive-accent tracking-wider">
-                          [업적] {msg.badge.title} : {msg.badge.condition} 조회
+                          [업적] {msg.badge.title} : {highlightVictim(msg.badge.condition, VICTIM_NAME)}
                         </p>
                       </div>
                     )}
@@ -284,7 +397,7 @@ export default function Home() {
                         <ul className="list-disc list-inside text-archive-accent/90 space-y-2">
                           {msg.suggestions.map((s, j) => (
                             <li key={j} className="text-archive-text/90 text-[15px] pl-1">
-                              {s}
+                              {highlightVictim(s, VICTIM_NAME)}
                             </li>
                           ))}
                         </ul>
@@ -313,28 +426,39 @@ export default function Home() {
         </div>
 
         <div className="shrink-0 p-6 border-t border-archive-border bg-black/80 backdrop-blur-md z-10 relative">
-          <div className="flex gap-4">
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={(e) => {
-                setInput(e.target.value);
-                setSuggestionIndex(-1);
-              }}
-              onKeyDown={handleKeyDown}
-              placeholder="자연어로 질문하세요. 예: 박지훈은 21시에 뭘 했지?"
-              className="flex-1 min-h-[52px] max-h-32 px-5 py-3.5 rounded-sm bg-black/60 border border-archive-border text-archive-text placeholder-archive-muted-deep focus:outline-none focus:border-archive-accent focus:ring-1 focus:ring-archive-accent/50 resize-none text-[16px] font-serif transition-colors shadow-inner"
-              rows={1}
-              disabled={loading}
-            />
-            <button
-              onClick={handleSubmit}
-              disabled={loading || !input.trim()}
-              className="shrink-0 px-8 py-2 rounded-sm bg-archive-surface text-archive-text font-bold font-mono tracking-widest hover:bg-archive-accent hover:text-white hover:border-archive-accent disabled:opacity-50 disabled:cursor-not-allowed transition-all border border-archive-border-subtle shadow-md uppercase text-[13px]"
-            >
-              Submit
-            </button>
-          </div>
+          {solved ? (
+            <div className="flex justify-center">
+              <button
+                onClick={handleRestart}
+                className="px-12 py-3 rounded-sm bg-archive-accent text-white font-bold font-mono tracking-widest hover:opacity-90 transition-all border border-archive-accent shadow-md uppercase text-[14px]"
+              >
+                다시 시작
+              </button>
+            </div>
+          ) : (
+            <div className="flex gap-4">
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={(e) => {
+                  setInput(e.target.value);
+                  setSuggestionIndex(-1);
+                }}
+                onKeyDown={handleKeyDown}
+                placeholder="질문하세요. 가설 기록: /가설 박지훈이 범인인 것 같아"
+                className="flex-1 min-h-[52px] max-h-32 px-5 py-3.5 rounded-sm bg-black/60 border border-archive-border text-archive-text placeholder-archive-muted-deep focus:outline-none focus:border-archive-accent focus:ring-1 focus:ring-archive-accent/50 resize-none text-[16px] font-serif transition-colors shadow-inner"
+                rows={1}
+                disabled={loading}
+              />
+              <button
+                onClick={handleSubmit}
+                disabled={loading || !input.trim()}
+                className="shrink-0 px-8 py-2 rounded-sm bg-archive-surface text-archive-text font-bold font-mono tracking-widest hover:bg-archive-accent hover:text-white hover:border-archive-accent disabled:opacity-50 disabled:cursor-not-allowed transition-all border border-archive-border-subtle shadow-md uppercase text-[13px]"
+              >
+                Submit
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -53,29 +53,41 @@ const BADGES: BadgeDef[] = [
   {
     id: "FIRST_CRACK",
     priority: 1,
-    message: "첫 균열. 이야기 어딘가가 살짝 어긋났어요.",
-    condition: "conflictCount 처음 1 이상",
-    check: (ctx) => ctx.hypotheses.some((h) => h.conflict >= 1),
+    message: "첫 균열.",
+    condition: "이야기 어딘가가 살짝 어긋났음을 발견했습니다",
+    check: (ctx) => {
+      if (!ctx.hypotheses.some((h) => h.conflict >= 1)) return false;
+      const queryIndicatesAwareness =
+        /모순|다르|말이\s*안\s*맞|이상|충돌|어긋나|맞지\s*않|괴리|불일치|말이\s*다르|안\s*맞는/i.test(
+          ctx.query
+        );
+      return queryIndicatesAwareness;
+    },
   },
   {
     id: "STATEMENT_CONFLICT",
     priority: 1,
     message: "말과 기록이 다릅니다.",
-    condition: "STATEMENT + CCTV/출입 기록 교차 조회",
+    condition: "진술과 영상·출입 기록의 모순을 포착했습니다",
     check: (ctx) => {
       const types = ctx.currentTurnEvidence.map((e) => e.type);
       const hasStatement = types.some((t) => t === "WITNESS_STATEMENT");
       const hasCctvOrAccess = types.some(
         (t) => t === "CCTV_LOG" || t === "ACCESS_LOG"
       );
-      return hasStatement && hasCctvOrAccess;
+      if (!hasStatement || !hasCctvOrAccess) return false;
+      const queryIndicatesAwareness =
+        /진술|말\s*과|말이|기록\s*과|기록이|다르|모순|비교|맞는지|맞지|일치|CCTV|출입|영상/i.test(
+          ctx.query
+        );
+      return queryIndicatesAwareness;
     },
   },
   {
     id: "ALIBI_SHAKE",
     priority: 1,
-    message: "알리바이 균열. 시계가 말을 바꾸고 있습니다.",
-    condition: "동일 인물 시간대 충돌",
+    message: "알리바이 균열.",
+    condition: "같은 인물의 시간대가 서로 맞지 않음을 확인했습니다",
     check: (ctx) => {
       const byPerson = new Map<string, { start: number; end: number }[]>();
       for (const e of ctx.currentTurnEvidence) {
@@ -86,23 +98,32 @@ const BADGES: BadgeDef[] = [
           byPerson.get(ent)!.push(tr);
         }
       }
+      let hasTimeConflict = false;
       for (const [, ranges] of byPerson) {
         for (let i = 0; i < ranges.length; i++) {
           for (let j = i + 1; j < ranges.length; j++) {
             if (ranges[i].end < ranges[j].start || ranges[j].end < ranges[i].start)
               continue;
-            return true;
+            hasTimeConflict = true;
+            break;
           }
+          if (hasTimeConflict) break;
         }
+        if (hasTimeConflict) break;
       }
-      return false;
+      if (!hasTimeConflict) return false;
+      const queryIndicatesAwareness =
+        /알리바이|시간대|맞지\s*않|모순|충돌|다르|말이\s*안\s*맞|이상|괴리|불일치|동시에|같은\s*시간/i.test(
+          ctx.query
+        );
+      return queryIndicatesAwareness;
     },
   },
   {
     id: "RECHECK_STATEMENT",
     priority: 1,
-    message: "다시 듣기. 같은 말, 다른 느낌.",
-    condition: "동일 인물 진술 2회 이상 조회",
+    message: "다시 듣기.",
+    condition: "같은 인물의 진술을 여러 번 비교해 들었습니다",
     check: (ctx) => {
       const seen = new Set([...ctx.seenRecordIds, ...ctx.currentTurnRecordIds]);
       const byPerson = new Map<string, number>();
@@ -118,15 +139,15 @@ const BADGES: BadgeDef[] = [
   {
     id: "CRACK_ACCUMULATION",
     priority: 1,
-    message: "균열 누적. 설명이 더 필요합니다.",
-    condition: "conflict ≥ 3",
+    message: "균열 누적.",
+    condition: "설명이 더 필요하다는 점을 여러 번 확인했습니다",
     check: (ctx) => ctx.hypotheses.some((h) => h.conflict >= 3),
   },
   {
     id: "TIME_NARROW",
     priority: 2,
     message: "시간 좁히기 성공.",
-    condition: "특정 시각 패턴 2회 이상",
+    condition: "특정 시각대를 여러 기록에서 교차 확인했습니다",
     check: (ctx) => {
       const times = ctx.currentTurnEvidence
         .map((e) => e.time_range.match(/\d{1,2}:\d{2}/g))
@@ -139,7 +160,7 @@ const BADGES: BadgeDef[] = [
     id: "PRE_EVENT_ZONE",
     priority: 2,
     message: "직전 구간 포착.",
-    condition: "사건 직전 10~15분 기록 조회",
+    condition: "사건 직전 10~15분 구간의 기록을 확인했습니다",
     check: (ctx) => {
       return ctx.currentTurnEvidence.some((e) => {
         const m = e.time_range.match(/(\d{1,2}):(\d{2})/);
@@ -155,18 +176,30 @@ const BADGES: BadgeDef[] = [
     id: "PATH_CONNECTED",
     priority: 2,
     message: "동선 연결. 점이 선이 되었습니다.",
-    condition: "연속 time_range 기록 2개 이상",
+    condition: "한 인물의 연속된 동선을 3개 이상 이어 보았습니다",
     check: (ctx) => {
-      const ev = ctx.currentTurnEvidence.sort((a, b) => {
+      const ev = [...ctx.currentTurnEvidence].sort((a, b) => {
         const ta = parseTimeRange(a.time_range)?.start ?? 0;
         const tb = parseTimeRange(b.time_range)?.start ?? 0;
         return ta - tb;
       });
-      if (ev.length < 2) return false;
-      for (let i = 1; i < ev.length; i++) {
-        const prev = parseTimeRange(ev[i - 1].time_range)?.end ?? 0;
-        const curr = parseTimeRange(ev[i].time_range)?.start ?? 0;
-        if (curr - prev <= 30) return true;
+      if (ev.length < 3) return false;
+      for (const person of new Set(ev.flatMap((e) => e.entities ?? []))) {
+        const personEv = ev.filter((e) => (e.entities ?? []).includes(person));
+        if (personEv.length < 3) continue;
+        const sorted = personEv.sort((a, b) => {
+          const ta = parseTimeRange(a.time_range)?.start ?? 0;
+          const tb = parseTimeRange(b.time_range)?.start ?? 0;
+          return ta - tb;
+        });
+        let chain = 1;
+        for (let i = 1; i < sorted.length; i++) {
+          const prev = parseTimeRange(sorted[i - 1].time_range)?.end ?? 0;
+          const curr = parseTimeRange(sorted[i].time_range)?.start ?? 0;
+          if (curr - prev <= 10) chain++;
+          else chain = 1;
+          if (chain >= 3) return true;
+        }
       }
       return false;
     },
@@ -175,7 +208,7 @@ const BADGES: BadgeDef[] = [
     id: "PERSON_INTERSECTION",
     priority: 3,
     message: "교차점 발견.",
-    condition: "두 인물 동일 RECORD 2개 이상",
+    condition: "두 인물이 같은 기록에 함께 등장함을 확인했습니다",
     check: (ctx) => {
       const personCount = new Map<string, Set<string>>();
       for (const e of ctx.currentTurnEvidence) {
@@ -200,7 +233,7 @@ const BADGES: BadgeDef[] = [
     id: "EMOTION_TRACE",
     priority: 3,
     message: "감정의 흔적.",
-    condition: "query에 원한/감정/언쟁 포함",
+    condition: "원한, 감정, 언쟁의 가능성을 탐색했습니다",
     check: (ctx) =>
       /원한|감정|언쟁|미움|분노|갈등|싫어|미워/i.test(ctx.query),
   },
@@ -208,19 +241,23 @@ const BADGES: BadgeDef[] = [
     id: "MONEY_TRACE",
     priority: 3,
     message: "돈의 흐름 확인.",
-    condition: "자금/계좌 기록 조회",
-    check: (ctx) =>
-      ctx.currentTurnEvidence.some(
+    condition: "자금·계좌 관련 기록을 두 가지 이상 확인했습니다",
+    check: (ctx) => {
+      const queryAboutMoney = /자금|계좌|비용|돈|이체|송금|입금|출금|컨설팅|접대|부대비용/i.test(ctx.query);
+      if (!queryAboutMoney) return false;
+      const moneyRecords = ctx.currentTurnEvidence.filter(
         (e) =>
-          /자금|계좌|비용|부대비용|컨설팅비|접대비/i.test(e.text || "") ||
-          e.type === "EMAIL"
-      ),
+          /자금|계좌|비용|부대비용|컨설팅비|접대비|이체|송금|입금|출금/i.test(e.text || "") ||
+          (e.type === "EMAIL" && /비용|금액|원/i.test(e.text || ""))
+      );
+      return moneyRecords.length >= 2;
+    },
   },
   {
     id: "MOTIVE_DEEPEN",
     priority: 3,
     message: "동기 구체화 시도.",
-    condition: "동일 인물 동기 질문 2회 이상",
+    condition: "한 인물의 동기를 두 번 이상 파고들었습니다",
     check: (ctx) => {
       const fromHistory = ctx.history.filter(
         (h) => h.role === "user" && /동기|원한|이유|왜/i.test(h.content)
@@ -233,7 +270,7 @@ const BADGES: BadgeDef[] = [
     id: "PHYSICAL_EVIDENCE",
     priority: 4,
     message: "물증 확보.",
-    condition: "포렌식/물증 기록 조회",
+    condition: "포렌식·물증 관련 기록을 확인했습니다",
     check: (ctx) =>
       ctx.currentTurnEvidence.some(
         (e) =>
@@ -244,15 +281,15 @@ const BADGES: BadgeDef[] = [
   {
     id: "METHOD_THEORY",
     priority: 4,
-    message: "방법 가설 제기.",
-    condition: "약물/혼입/유도 query 포함",
+    message: "범인의 도구.",
+    condition: "범행을 일으킨 도구를 제시했습니다",
     check: (ctx) => /약물|혼입|유도|독|타격|때린/i.test(ctx.query),
   },
   {
     id: "EVIDENCE_ACCUMULATION",
     priority: 4,
     message: "단서 축적.",
-    condition: "동일 인물 기록 3개 이상 조회",
+    condition: "한 인물에 대한 기록을 세 개 이상 모았습니다",
     check: (ctx) => {
       const combined = new Set([...ctx.seenRecordIds, ...ctx.currentTurnRecordIds]);
       const byPerson = new Map<string, number>();
@@ -269,7 +306,7 @@ const BADGES: BadgeDef[] = [
     id: "FIRST_CCTV",
     priority: 5,
     message: "영상 열람 시작.",
-    condition: "첫 CCTV 조회",
+    condition: "처음으로 CCTV 기록을 열람했습니다",
     check: (ctx) => {
       const hadCctvBefore = ctx.allEvidence
         .filter((e) => e.type === "CCTV_LOG")
@@ -284,7 +321,7 @@ const BADGES: BadgeDef[] = [
     id: "ACCESS_LOG_CHECK",
     priority: 5,
     message: "출입 기록 확보.",
-    condition: "출입 기록 조회",
+    condition: "출입 기록을 확인했습니다",
     check: (ctx) =>
       ctx.currentTurnEvidence.some(
         (e) => e.type === "ACCESS_LOG" || /출입|입실|퇴실/i.test(e.text || "")
@@ -294,7 +331,7 @@ const BADGES: BadgeDef[] = [
     id: "PATH_TRACKING",
     priority: 5,
     message: "동선 추적.",
-    condition: "동일 인물 CCTV 2개 이상",
+    condition: "한 인물의 CCTV 기록을 두 개 이상 확인했습니다",
     check: (ctx) => {
       const cctvRecords = ctx.currentTurnEvidence.filter(
         (e) => e.type === "CCTV_LOG"
@@ -312,7 +349,7 @@ const BADGES: BadgeDef[] = [
     id: "CCTV_REVIEW",
     priority: 5,
     message: "다시 보기.",
-    condition: "동일 시간대 CCTV 재조회",
+    condition: "같은 시간대 CCTV를 다시 확인했습니다",
     check: (ctx) => {
       const cctvIds = new Set(
         ctx.allEvidence.filter((e) => e.type === "CCTV_LOG").map((e) => e.id)
@@ -328,21 +365,21 @@ const BADGES: BadgeDef[] = [
     id: "BLIND_SPOT",
     priority: 5,
     message: "보이지 않는 구간.",
-    condition: "query에 사각지대 포함",
+    condition: "사각지대나 빈 구간을 의심하고 탐색했습니다",
     check: (ctx) => /사각지대|안 보이|없는 구간|빈 구간/i.test(ctx.query),
   },
   {
     id: "RELATION_QUERY",
     priority: 5,
     message: "관계 탐색 시작.",
-    condition: "query에 관계 포함",
+    condition: "인물 간 관계를 탐색하기 시작했습니다",
     check: (ctx) => /관계|사이|알던|친분|지인/i.test(ctx.query),
   },
   {
     id: "PERSON_CROSS_QUERY",
     priority: 5,
     message: "인물 교차 분석.",
-    condition: "query에 두 인물 이상 포함",
+    condition: "두 인물 이상을 함께 비교해 보았습니다",
     check: (ctx) => {
       const names = [
         "박지훈",
@@ -364,7 +401,7 @@ const BADGES: BadgeDef[] = [
     id: "RECENT_CONTACT",
     priority: 5,
     message: "최근 접촉 확인.",
-    condition: "최근 + 인물 query",
+    condition: "사건 직전 접촉 여부를 확인했습니다",
     check: (ctx) =>
       /최근|직전|바로 전|그 전/i.test(ctx.query) &&
       /박지훈|이서연|최민수|정하은|강태우|윤서현|김도윤/i.test(ctx.query),
@@ -373,7 +410,7 @@ const BADGES: BadgeDef[] = [
     id: "CONFLICT_TRACE",
     priority: 5,
     message: "갈등 흔적.",
-    condition: "언쟁 기록 조회",
+    condition: "언쟁·갈등 관련 기록을 확인했습니다",
     check: (ctx) =>
       ctx.currentTurnEvidence.some(
         (e) => /언쟁|갈등|싸움|대립|충돌/i.test(e.text || "")
@@ -383,7 +420,7 @@ const BADGES: BadgeDef[] = [
     id: "COMMUNICATION_TRACE",
     priority: 5,
     message: "통신 흔적 확보.",
-    condition: "통화/SMS 기록 조회",
+    condition: "통화·문자·이메일 기록을 확인했습니다",
     check: (ctx) =>
       ctx.currentTurnEvidence.some(
         (e) =>
@@ -396,7 +433,7 @@ const BADGES: BadgeDef[] = [
     id: "OVERVIEW_RECHECK",
     priority: 5,
     message: "기본 재확인.",
-    condition: "사건 개요 2회 이상 조회",
+    condition: "사건 개요를 두 번 이상 다시 확인했습니다",
     check: (ctx) => {
       const fromHistory = ctx.history.filter(
         (h) =>
@@ -411,7 +448,7 @@ const BADGES: BadgeDef[] = [
     id: "PERSON_DEEP_DIVE",
     priority: 5,
     message: "인물 집중 탐색.",
-    condition: "한 인물 기록 4개 이상 조회",
+    condition: "한 인물에 대한 기록을 네 개 이상 모았습니다",
     check: (ctx) => {
       const combined = new Set([...ctx.seenRecordIds, ...ctx.currentTurnRecordIds]);
       const byPerson = new Map<string, number>();

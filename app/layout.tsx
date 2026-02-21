@@ -13,7 +13,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="ko">
-      <body className="min-h-screen bg-archive-bg text-archive-text">
+      <body className="min-h-screen bg-archive-bg text-archive-text font-serif">
         {children}
       </body>
     </html>
