@@ -172,16 +172,55 @@ export async function POST(req: NextRequest) {
 
   const hintCount = Math.min(3, Math.max(0, Number(incomingSession?.hintCount) || 0));
 
-  if (/^\/힌트$/i.test(query.trim())) {
-    const MAX_HINTS = 3;
-    if (hintCount >= MAX_HINTS) {
+  if (/^\/포기$/i.test(query.trim())) {
+    if (hintCount < 3) {
       return NextResponse.json({
-        response: `힌트는 ${MAX_HINTS}번까지 사용 가능합니다. (${hintCount}/${MAX_HINTS} 사용 완료)`,
+        response: "힌트를 3번 모두 사용한 후에 포기할 수 있습니다.",
         sources: [],
         suggestions: [
           "7월 18일 당시 별관 출입 기록은?",
           "피해자 김도윤과 관련된 인물은?",
-          "CCTV 기록에서 확인된 시간대는?",
+        ],
+        hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
+        seenRecordIds,
+        triggeredBadges,
+        solved: false,
+        sessionState: { solved: false, hintCount },
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+      });
+    }
+    const config = CASE_CONFIG;
+    const responseText = `[포기]
+
+${config.ending.solvedTitle}
+
+${config.ending.solvedSummaryLines.map((l) => `- ${l}`).join("\n")}
+
+${config.ending.closedLine}`;
+
+    return NextResponse.json({
+      response: responseText,
+      sources: [],
+      suggestions: [],
+      hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
+      seenRecordIds,
+      triggeredBadges,
+      solved: true,
+      sessionState: { solved: true, solvedAt: new Date().toISOString(), hintCount },
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, embeddingTokens: 0, costUsd: 0, costKrw: 0 },
+    });
+  }
+
+  if (/^\/힌트$/i.test(query.trim())) {
+    const MAX_HINTS = 3;
+    if (hintCount >= MAX_HINTS) {
+      return NextResponse.json({
+        response: `힌트는 ${MAX_HINTS}번까지 사용 가능합니다. (${hintCount}/${MAX_HINTS} 사용 완료)\n\n포기하시려면 /포기 를 입력하세요.`,
+        sources: [],
+        suggestions: [
+          "/포기",
+          "7월 18일 당시 별관 출입 기록은?",
+          "피해자 김도윤과 관련된 인물은?",
         ],
         hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
         seenRecordIds,
@@ -480,13 +519,20 @@ export async function POST(req: NextRequest) {
       finalNext = ["21:10~21:20 3층 CCTV 기록은?", "감사 관련 이메일 내용은?"];
     }
 
+    const contentIsGood =
+      parse.suspectMentioned &&
+      parse.hasMotive &&
+      parse.hasMethod &&
+      parse.motiveHits >= 1 &&
+      parse.methodHits >= 1;
+
     let message = "";
     if (grade === "A" && solved) {
       message = "사건 해결. 제출한 결론은 사건 기록과 일치합니다.";
     } else if (grade === "A") {
       message = "결론은 기록과 높은 정합성을 보입니다. 다만 핵심 인물 또는 연쇄를 한 번 더 점검해 보세요.";
-    } else if (grade === "B") {
-      message = "가능성은 있지만 근거가 아직 덜 모였습니다.";
+    } else if (grade === "B" || contentIsGood) {
+      message = "가능성은 있지만 근거가 아직 덜 모였습니다. 핵심 기록을 더 조회해 보세요.";
     } else {
       message = "'누가/왜/어떻게'를 한 문장으로 정리해 주세요. 예: 'A가 B 때문에 C로 범행했다.'";
     }
@@ -496,10 +542,14 @@ GRADE: ${grade}
 STATUS: ${solved ? "SOLVED" : "NOT_SOLVED"}
 
 [SYSTEM]
-MESSAGE: ${message}
+MESSAGE: ${message}`;
+
+    if (!solved) {
+      responseText += `
 
 NEXT:
 ${finalNext.map((q) => `- ${q}`).join("\n")}`;
+    }
 
     if (solved) {
       responseText += `
@@ -513,7 +563,7 @@ ${config.ending.closedLine}`;
     return NextResponse.json({
       response: responseText,
       sources: [],
-      suggestions: finalNext,
+      suggestions: solved ? [] : finalNext,
       hypotheses: hypotheses.slice(0, MAX_HYPOTHESES),
       seenRecordIds,
       triggeredBadges,

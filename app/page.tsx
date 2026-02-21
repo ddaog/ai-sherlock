@@ -3,20 +3,31 @@
 import { useState, useRef, useEffect } from "react";
 import type { Hypothesis } from "@/lib/hypothesesSimple";
 import { VICTIM_NAME } from "@/data/case.display";
-import { trackActivationClaimHint, trackUserMessage } from "@/lib/analytics";
+import { trackActivationClaimHint, trackUserMessage, trackConversion } from "@/lib/analytics";
 
 const SESSION_STORAGE_KEY = "case_session_state_v9";
 const MAX_HYPOTHESES = 5;
 const MAX_HINTS = 3;
 
-const SLASH_COMMANDS = [
-  { cmd: "/가설", desc: "가설 기록" },
-  { cmd: "/추리", desc: "결론 제출" },
-  { cmd: "/힌트", desc: "힌트 요청 (3회 제한)" },
-] as const;
+const getHintDesc = (hintCount: number) => {
+  if (hintCount >= 3) return "사용불가";
+  return `${3 - hintCount}회 남음`;
+};
+
+function getSlashCommands(hintCount: number) {
+  const base = [
+    { cmd: "/가설", desc: "가설 기록" },
+    { cmd: "/추리", desc: "결론 제출" },
+    { cmd: "/힌트", desc: `힌트 (${getHintDesc(hintCount)})` },
+  ];
+  if (hintCount >= MAX_HINTS) {
+    base.push({ cmd: "/포기", desc: "정답 공개 및 포기" });
+  }
+  return base;
+}
 
 const isCompleteCommand = (v: string) =>
-  v.startsWith("/가설") || v.startsWith("/추리") || v.startsWith("/힌트");
+  v.startsWith("/가설") || v.startsWith("/추리") || v.startsWith("/힌트") || v.startsWith("/포기");
 
 function highlightVictim(text: string, victim: string) {
   if (!victim) return text;
@@ -33,13 +44,13 @@ function highlightVictim(text: string, victim: string) {
 }
 
 function highlightMessageContent(text: string, victim: string) {
-  const parts = text.split(new RegExp(`(${victim}|/가설|/추리|/힌트)`, "g"));
+  const parts = text.split(new RegExp(`(${victim}|/가설|/추리|/힌트|/포기)`, "g"));
   return parts.map((part, i) =>
     part === victim ? (
       <span key={i} className="text-archive-accent font-semibold">
         {part}
       </span>
-    ) : ["/가설", "/추리", "/힌트"].includes(part) ? (
+    ) : ["/가설", "/추리", "/힌트", "/포기"].includes(part) ? (
       <span key={i} className="text-archive-accent font-mono font-semibold">
         {part}
       </span>
@@ -50,9 +61,9 @@ function highlightMessageContent(text: string, victim: string) {
 }
 
 function formatInputWithCommands(text: string) {
-  const parts = text.split(/(\/가설|\/추리|\/힌트)/g);
+  const parts = text.split(/(\/가설|\/추리|\/힌트|\/포기)/g);
   return parts.map((part, i) =>
-    ["/가설", "/추리", "/힌트"].includes(part) ? (
+    ["/가설", "/추리", "/힌트", "/포기"].includes(part) ? (
       <span key={i} className="text-archive-accent font-mono font-semibold">
         {part}
       </span>
@@ -166,6 +177,11 @@ export default function Home() {
   const [hintCount, setHintCount] = useState(0);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [commandPaletteIndex, setCommandPaletteIndex] = useState(0);
+  const [preregEmail, setPreregEmail] = useState("");
+  const [preregName, setPreregName] = useState("");
+  const [preregSubmitted, setPreregSubmitted] = useState(false);
+  const [preregLoading, setPreregLoading] = useState(false);
+  const [preregError, setPreregError] = useState("");
   const logEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const inputOverlayRef = useRef<HTMLDivElement>(null);
@@ -214,7 +230,42 @@ export default function Home() {
     setPendingHypothesisReplace(undefined);
     setPendingReset(false);
     setShowCommandPalette(false);
+    setPreregSubmitted(false);
+    setPreregError("");
     inputRef.current?.focus();
+  };
+
+  const handlePreregister = async () => {
+    const email = preregEmail.trim();
+    const name = preregName.trim();
+    if (!email || !name) {
+      setPreregError("이메일과 이름을 모두 입력해 주세요.");
+      return;
+    }
+    setPreregError("");
+    setPreregLoading(true);
+    try {
+      const res = await fetch("/api/preregister", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email,
+          name,
+          url: typeof window !== "undefined" ? window.location.href : "",
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setPreregSubmitted(true);
+        trackConversion("preregistration");
+      } else {
+        setPreregError(data.error || "등록에 실패했습니다.");
+      }
+    } catch {
+      setPreregError("등록 중 오류가 발생했습니다.");
+    } finally {
+      setPreregLoading(false);
+    }
   };
 
   const lastSuggestions =
@@ -390,17 +441,17 @@ export default function Home() {
       }
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setCommandPaletteIndex((i) => (i + 1) % SLASH_COMMANDS.length);
+        setCommandPaletteIndex((i) => (i + 1) % getSlashCommands(hintCount).length);
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setCommandPaletteIndex((i) => (i - 1 + SLASH_COMMANDS.length) % SLASH_COMMANDS.length);
+        setCommandPaletteIndex((i) => (i - 1 + getSlashCommands(hintCount).length) % getSlashCommands(hintCount).length);
         return;
       }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        handleSelectCommand(SLASH_COMMANDS[commandPaletteIndex].cmd);
+        handleSelectCommand(getSlashCommands(hintCount)[commandPaletteIndex].cmd);
         return;
       }
     }
@@ -568,15 +619,58 @@ export default function Home() {
           <div ref={logEndRef} className="h-6" />
         </div>
 
-        <div className="shrink-0 p-6 border-t border-archive-border bg-black/80 backdrop-blur-md z-10 relative">
+        <div className="shrink-0 p-6 border-t border-archive-border bg-black/80 backdrop-blur-md z-20 relative">
           {solved ? (
-            <div className="flex justify-center">
-              <button
-                onClick={handleRestart}
-                className="px-12 py-3 rounded-sm bg-archive-accent text-white font-bold font-mono tracking-widest hover:opacity-90 transition-all border border-archive-accent shadow-md uppercase text-[14px]"
-              >
-                다시 시작
-              </button>
+            <div className="space-y-6">
+              <div className="rounded-md border border-archive-accent/40 bg-archive-accent/5 px-6 py-5">
+                <p className="text-archive-accent font-bold text-[15px] mb-2">AI 셜록 앱 출시 시 혜택을 제공합니다</p>
+                <p className="text-archive-text/90 text-[14px] leading-relaxed">
+                  사전등록하시면 앱 출시 시 특별 혜택을 받으실 수 있습니다. 이메일과 이름을 입력해 주세요.
+                </p>
+              </div>
+              {preregSubmitted ? (
+                <div className="text-center space-y-4">
+                  <p className="text-archive-accent font-semibold text-[15px]">사전등록이 완료되었습니다. 감사합니다.</p>
+                  <button
+                    onClick={handleRestart}
+                    className="px-10 py-2.5 rounded-sm bg-archive-surface text-archive-text font-mono border border-archive-border hover:bg-archive-accent hover:text-white hover:border-archive-accent transition-all text-[13px]"
+                  >
+                    다시 시작
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-4 max-w-sm mx-auto">
+                  <input
+                    type="text"
+                    inputMode="email"
+                    autoComplete="email"
+                    value={preregEmail}
+                    onChange={(e) => setPreregEmail(e.target.value)}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    placeholder="이메일"
+                    className="px-4 py-3 rounded-sm bg-black/60 border border-archive-border text-archive-text placeholder-archive-muted-deep focus:outline-none focus:border-archive-accent text-[14px] w-full"
+                  />
+                  <input
+                    type="text"
+                    autoComplete="name"
+                    value={preregName}
+                    onChange={(e) => setPreregName(e.target.value)}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    placeholder="이름"
+                    className="px-4 py-3 rounded-sm bg-black/60 border border-archive-border text-archive-text placeholder-archive-muted-deep focus:outline-none focus:border-archive-accent text-[14px] w-full"
+                  />
+                  {preregError && (
+                    <p className="text-archive-accent text-[13px]">{preregError}</p>
+                  )}
+                  <button
+                    onClick={handlePreregister}
+                    disabled={preregLoading}
+                    className="px-12 py-3 rounded-sm bg-archive-accent text-white font-bold font-mono tracking-widest hover:opacity-90 transition-all border border-archive-accent shadow-md uppercase text-[14px] disabled:opacity-50"
+                  >
+                    {preregLoading ? "등록 중..." : "사전등록"}
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
             <div className="flex gap-4">
@@ -649,7 +743,7 @@ export default function Home() {
                   <p className="px-4 py-2 text-archive-muted-deep text-[11px] font-mono tracking-widest uppercase border-b border-archive-border">
                     명령어
                   </p>
-                  {SLASH_COMMANDS.map(({ cmd, desc }, i) => (
+                  {getSlashCommands(hintCount).map(({ cmd, desc }, i) => (
                     <button
                       key={cmd}
                       type="button"
