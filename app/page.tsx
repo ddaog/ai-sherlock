@@ -1,0 +1,342 @@
+"use client";
+
+import { useState, useRef, useEffect } from "react";
+import type { Hypothesis } from "@/lib/hypothesesSimple";
+
+function Typewriter({ text, onType }: { text: string; onType?: () => void }) {
+  const [displayedText, setDisplayedText] = useState("");
+  const onTypeRef = useRef(onType);
+
+  useEffect(() => {
+    onTypeRef.current = onType;
+  }, [onType]);
+
+  useEffect(() => {
+    let index = 0;
+    setDisplayedText("");
+    const interval = setInterval(() => {
+      setDisplayedText(text.slice(0, index + 1));
+      index++;
+      if (onTypeRef.current) onTypeRef.current();
+      if (index >= text.length) clearInterval(interval);
+    }, 20);
+    return () => clearInterval(interval);
+  }, [text]);
+
+  return (
+    <>
+      {displayedText}
+      {displayedText.length < text.length && (
+        <span className="inline-block w-2 h-4 bg-archive-accent ml-1 -mb-0.5 align-baseline animate-pulse"></span>
+      )}
+    </>
+  );
+}
+
+interface Usage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  embeddingTokens: number;
+  costUsd: number;
+  costKrw: number;
+}
+
+interface Message {
+  role: "user" | "assistant";
+  content?: string;
+  response?: string;
+  badge?: { title: string; condition: string };
+  sources?: string[];
+  suggestions?: string[];
+  usage?: Usage;
+}
+
+export default function Home() {
+  const [input, setInput] = useState("");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [cumulativeCostKrw, setCumulativeCostKrw] = useState(0);
+  const [hypotheses, setHypotheses] = useState<Hypothesis[]>([]);
+  const [seenRecordIds, setSeenRecordIds] = useState<string[]>([]);
+  const [triggeredBadges, setTriggeredBadges] = useState<string[]>([]);
+  const [suggestionIndex, setSuggestionIndex] = useState(-1);
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  const lastSuggestions =
+    [...messages]
+      .reverse()
+      .find((m) => m.role === "assistant" && m.suggestions?.length)
+      ?.suggestions ?? [];
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  const handleSubmit = async () => {
+    const trimmed = input.trim();
+    if (!trimmed || loading) return;
+
+    setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
+    setInput("");
+    setLoading(true);
+
+    try {
+      const history = messages
+        .filter((m) => m.content)
+        .map((m) => ({
+          role: m.role,
+          content:
+            m.role === "user"
+              ? m.content!
+              : [
+                m.response || "",
+                m.sources?.length ? "SOURCES: " + m.sources.join(", ") : "",
+                m.suggestions?.length ? "SUGGESTION: " + m.suggestions.join("; ") : "",
+              ]
+                .filter(Boolean)
+                .join("\n"),
+        }));
+
+      const res = await fetch("/api/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: trimmed,
+          history,
+          hypotheses,
+          seenRecordIds,
+          triggeredBadges,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        if (Array.isArray(data.hypotheses)) setHypotheses(data.hypotheses);
+        if (Array.isArray(data.seenRecordIds)) setSeenRecordIds(data.seenRecordIds);
+        if (Array.isArray(data.triggeredBadges)) setTriggeredBadges(data.triggeredBadges);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            response: data.error || "오류가 발생했습니다.",
+            suggestions: [
+              "7월 18일 당시 별관 출입 기록은?",
+              "피해자 김도윤과 관련된 인물은?",
+            ],
+          },
+        ]);
+        setSuggestionIndex(-1);
+        return;
+      }
+
+      if (Array.isArray(data.hypotheses)) setHypotheses(data.hypotheses);
+      if (Array.isArray(data.seenRecordIds)) setSeenRecordIds(data.seenRecordIds);
+      if (Array.isArray(data.triggeredBadges)) setTriggeredBadges(data.triggeredBadges);
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          response: data.response,
+          badge: data.badge,
+          sources: data.sources || [],
+          suggestions: data.suggestions || [],
+          usage: data.usage,
+        },
+      ]);
+      setSuggestionIndex(-1);
+      if (data.usage?.costKrw) {
+        setCumulativeCostKrw((prev) => prev + data.usage.costKrw);
+      }
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          response: "연결 오류가 발생했습니다. 다시 시도해 주세요.",
+          suggestions: [],
+        },
+      ]);
+    } finally {
+      setLoading(false);
+      inputRef.current?.focus();
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
+      return;
+    }
+    if (e.key === "ArrowUp" && lastSuggestions.length > 0) {
+      e.preventDefault();
+      const next =
+        suggestionIndex <= 0 ? lastSuggestions.length - 1 : suggestionIndex - 1;
+      setSuggestionIndex(next);
+      setInput(lastSuggestions[next]);
+      return;
+    }
+    if (e.key === "ArrowDown" && lastSuggestions.length > 0) {
+      e.preventDefault();
+      const next =
+        suggestionIndex >= lastSuggestions.length - 1 ? 0 : suggestionIndex + 1;
+      setSuggestionIndex(next);
+      setInput(lastSuggestions[next]);
+      return;
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-screen w-full bg-archive-bg relative text-archive-text font-serif scanlines overflow-hidden">
+      <div className="max-w-3xl w-full mx-auto flex flex-col h-full bg-archive-bg/95 shadow-2xl relative z-10 border-x border-archive-border-subtle">
+        <header className="shrink-0 py-2.5 px-4 border-b border-archive-border flex items-center justify-between gap-4 font-mono z-10 relative bg-black/70 backdrop-blur-md">
+          <h1 className="text-base font-bold text-archive-text flex items-center gap-2 tracking-wide">
+            <span className="w-1.5 h-3 bg-archive-accent caret-blink inline-block"></span>
+            사건 기록 시스템 <span className="text-archive-accent opacity-80 text-xs">v1.4</span>
+          </h1>
+          <p className="text-archive-muted-deep text-[10px] shrink-0 tracking-widest uppercase">
+            누적 비용: ₩{cumulativeCostKrw.toFixed(3)}
+          </p>
+        </header>
+
+        {hypotheses.length > 0 && (
+          <div className="shrink-0 px-4 py-2 bg-archive-surface/60 border-b border-archive-border text-xs backdrop-blur-sm z-10 relative">
+            <p className="text-archive-accent mb-1 font-mono text-[10px] tracking-widest font-bold uppercase">
+              [CURRENT HYPOTHESES]
+            </p>
+            <ul className="space-y-1 text-archive-text font-serif leading-snug">
+              {hypotheses.map((h) => (
+                <li key={h.id} className="text-[13px] flex items-start gap-1.5">
+                  <span className="text-archive-muted shrink-0 mt-0.5">-</span>
+                  <span>
+                    <span className="font-bold mr-1">{h.id}</span> {h.text}
+                    <span className="text-archive-muted-deep ml-1.5 text-[11px] font-mono tracking-tight">
+                      (지지 {h.support} / 충돌 {h.conflict})
+                    </span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div className="shrink-0 px-4 py-3 bg-archive-surface/30 border-b border-archive-border text-[13px] text-archive-muted space-y-2 z-10 relative font-serif">
+          <p className="leading-snug">
+            당신은 외부 조사관입니다. 시스템은 사건 기록을 보관하고 있으며, 당신의
+            질문에 따라 기록 일부를 열람할 수 있습니다. <span className="text-archive-accent opacity-90 ml-1">본 시스템은 범인을 판정하지 않습니다. 기록을 연결해 전말을 재구성하세요.</span>
+          </p>
+          <div className="pt-2 mt-2 border-t border-archive-border border-dashed text-archive-text bg-black/40 px-3 py-2 rounded-sm shadow-inner text-[12px]">
+            <p className="font-bold mb-1.5 font-mono text-archive-accent text-[10px] tracking-widest uppercase">[SYNOPSIS]</p>
+            <p className="leading-normal">7월 18일 밤, 회사 별관 3층에서 CFO 김도윤이 의식불명 상태로 발견되었다. 외부 침입 흔적은 없으며, 당시 출입 인원은 총 7명. (다음날 내부 감사 예정)</p>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-6 space-y-8 z-10 relative scroll-smooth">
+          {messages.map((msg, i) => (
+            <div
+              key={i}
+              className={`flex animate-fade-in ${msg.role === "user" ? "justify-end" : "justify-start"
+                }`}
+            >
+              <div
+                className={
+                  msg.role === "user"
+                    ? "max-w-[85%] rounded-md px-5 py-3 bg-archive-surface border border-archive-border shadow-lg shadow-black/60"
+                    : "max-w-[95%] w-full"
+                }
+              >
+                {msg.role === "user" ? (
+                  <p className="text-[16px] text-archive-text font-serif leading-relaxed tracking-wide">{msg.content}</p>
+                ) : (
+                  <div className="space-y-5 text-[16px] font-serif">
+                    {msg.response && (
+                      <div className="text-archive-text leading-[1.8] whitespace-pre-wrap px-5 py-4 bg-black/40 border-l-2 border-archive-accent rounded-r-md shadow-md">
+                        {i === messages.length - 1 && !loading ? (
+                          <Typewriter
+                            text={msg.response}
+                            onType={() => logEndRef.current?.scrollIntoView({ behavior: "auto" })}
+                          />
+                        ) : (
+                          msg.response
+                        )}
+                      </div>
+                    )}
+                    {msg.badge && (
+                      <div className="px-5 py-3 mt-4 rounded-md bg-archive-accent/10 border border-archive-accent/30">
+                        <p className="font-mono text-[13px] font-semibold text-archive-accent tracking-wider">
+                          [업적] {msg.badge.title} : {msg.badge.condition} 조회
+                        </p>
+                      </div>
+                    )}
+                    {msg.sources && msg.sources.length > 0 && (
+                      <p className="text-archive-muted text-[13px] font-mono tracking-wide px-5">
+                        <span className="text-archive-muted-deep uppercase tracking-widest text-[11px] mr-2">출처:</span>
+                        {msg.sources.map((id) => `[${id}]`).join(", ")}
+                      </p>
+                    )}
+                    {msg.suggestions && msg.suggestions.length > 0 && (
+                      <div className="px-5 py-4 bg-archive-surface/40 rounded-md border border-archive-border-subtle mt-5 shadow-sm">
+                        <p className="text-archive-muted-deep mb-3 text-[11px] font-mono tracking-widest uppercase">[SUGGESTED QUERIES]</p>
+                        <ul className="list-disc list-inside text-archive-accent/90 space-y-2">
+                          {msg.suggestions.map((s, j) => (
+                            <li key={j} className="text-archive-text/90 text-[15px] pl-1">
+                              {s}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {msg.usage && (
+                      <div className="px-5 mt-4">
+                        <p className="text-archive-muted-deep text-[11px] pt-3 border-t border-archive-border-subtle font-mono text-right uppercase tracking-wider">
+                          토큰: {msg.usage.totalTokens} (입력 {msg.usage.promptTokens} + 출력 {msg.usage.completionTokens} + 임베딩 {msg.usage.embeddingTokens}) · 비용: ₩{(msg.usage.costKrw ?? 0).toFixed(3)}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+          {loading && (
+            <div className="flex justify-start animate-fade-in px-5 py-2">
+              <p className="text-archive-accent/80 text-[13px] font-mono tracking-widest flex items-center gap-3 uppercase">
+                <span className="w-1.5 h-3.5 bg-archive-accent caret-blink inline-block"></span> 기록 조회 중 ...
+              </p>
+            </div>
+          )}
+          <div ref={logEndRef} className="h-6" />
+        </div>
+
+        <div className="shrink-0 p-6 border-t border-archive-border bg-black/80 backdrop-blur-md z-10 relative">
+          <div className="flex gap-4">
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => {
+                setInput(e.target.value);
+                setSuggestionIndex(-1);
+              }}
+              onKeyDown={handleKeyDown}
+              placeholder="자연어로 질문하세요. 예: 박지훈은 21시에 뭘 했지?"
+              className="flex-1 min-h-[52px] max-h-32 px-5 py-3.5 rounded-sm bg-black/60 border border-archive-border text-archive-text placeholder-archive-muted-deep focus:outline-none focus:border-archive-accent focus:ring-1 focus:ring-archive-accent/50 resize-none text-[16px] font-serif transition-colors shadow-inner"
+              rows={1}
+              disabled={loading}
+            />
+            <button
+              onClick={handleSubmit}
+              disabled={loading || !input.trim()}
+              className="shrink-0 px-8 py-2 rounded-sm bg-archive-surface text-archive-text font-bold font-mono tracking-widest hover:bg-archive-accent hover:text-white hover:border-archive-accent disabled:opacity-50 disabled:cursor-not-allowed transition-all border border-archive-border-subtle shadow-md uppercase text-[13px]"
+            >
+              Submit
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
