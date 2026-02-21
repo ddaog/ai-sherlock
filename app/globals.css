@@ -111,3 +111,12 @@
 .caret-blink {
   animation: blink 1s step-end infinite;
 }
+
+/* Input overlay: hide scrollbar, sync with textarea */
+.input-overlay-sync {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.input-overlay-sync::-webkit-scrollbar {
+  display: none;
+}

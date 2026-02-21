@@ -14,12 +14,45 @@ const SLASH_COMMANDS = [
   { cmd: "/힌트", desc: "힌트 요청 (3회 제한)" },
 ] as const;
 
+const isCompleteCommand = (v: string) =>
+  v.startsWith("/가설") || v.startsWith("/추리") || v.startsWith("/힌트");
+
 function highlightVictim(text: string, victim: string) {
   if (!victim) return text;
   const parts = text.split(new RegExp(`(${victim})`, "g"));
   return parts.map((part, i) =>
     part === victim ? (
       <span key={i} className="text-archive-accent font-semibold">
+        {part}
+      </span>
+    ) : (
+      part
+    )
+  );
+}
+
+function highlightMessageContent(text: string, victim: string) {
+  const parts = text.split(new RegExp(`(${victim}|/가설|/추리|/힌트)`, "g"));
+  return parts.map((part, i) =>
+    part === victim ? (
+      <span key={i} className="text-archive-accent font-semibold">
+        {part}
+      </span>
+    ) : ["/가설", "/추리", "/힌트"].includes(part) ? (
+      <span key={i} className="text-archive-accent font-mono font-semibold">
+        {part}
+      </span>
+    ) : (
+      part
+    )
+  );
+}
+
+function formatInputWithCommands(text: string) {
+  const parts = text.split(/(\/가설|\/추리|\/힌트)/g);
+  return parts.map((part, i) =>
+    ["/가설", "/추리", "/힌트"].includes(part) ? (
+      <span key={i} className="text-archive-accent font-mono font-semibold">
         {part}
       </span>
     ) : (
@@ -134,6 +167,7 @@ export default function Home() {
   const [commandPaletteIndex, setCommandPaletteIndex] = useState(0);
   const logEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const inputOverlayRef = useRef<HTMLDivElement>(null);
   const paletteRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -439,8 +473,8 @@ export default function Home() {
           {messages.length === 0 && (
             <div className="text-archive-muted text-[13px] font-serif space-y-3 pb-6">
               <p className="font-mono text-archive-accent text-[11px] tracking-widest uppercase mb-4">[플레이 방법]</p>
-              <p><span className="font-mono text-archive-accent">/가설</span> 가설 기록. 예: /가설 박지훈이 범인인 것 같아</p>
-              <p><span className="font-mono text-archive-accent">/추리</span> 결론 제출. 예: /추리 박지훈이 비자금 때문에 약물로 범행했다</p>
+              <p><span className="font-mono text-archive-accent">/가설</span> 가설 기록. 예: <span className="font-mono text-archive-accent">/가설</span> 박지훈이 범인인 것 같아</p>
+              <p><span className="font-mono text-archive-accent">/추리</span> 결론 제출. 예: <span className="font-mono text-archive-accent">/추리</span> 박지훈이 비자금 때문에 약물로 범행했다</p>
               <p><span className="font-mono text-archive-accent">/힌트</span> 적당한 힌트 제공 (3회 제한)</p>
               <p><span className="font-mono text-archive-accent">/초기화</span> localStorage 삭제 후 게임 다시 시작 (Y/N 확인)</p>
             </div>
@@ -460,7 +494,7 @@ export default function Home() {
               >
                 {msg.role === "user" ? (
                   <p className="text-[16px] text-archive-text font-serif leading-relaxed tracking-wide">
-                    {highlightVictim(msg.content ?? "", VICTIM_NAME)}
+                    {highlightMessageContent(msg.content ?? "", VICTIM_NAME)}
                   </p>
                 ) : (
                   <div className="space-y-5 text-[16px] font-serif">
@@ -540,7 +574,8 @@ export default function Home() {
                 <div className="flex items-stretch rounded-sm border border-archive-border bg-black/60 focus-within:border-archive-accent focus-within:ring-1 focus-within:ring-archive-accent/50">
                 <button
                   type="button"
-                  onClick={() => {
+                  onMouseDown={(e) => {
+                    e.preventDefault();
                     setInput("/");
                     setShowCommandPalette(true);
                     setCommandPaletteIndex(0);
@@ -551,29 +586,51 @@ export default function Home() {
                 >
                   /
                 </button>
-                <textarea
-                  ref={inputRef}
-                  value={input}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setInput(v);
-                    setSuggestionIndex(-1);
-                    setShowCommandPalette(v.startsWith("/"));
-                    if (v.startsWith("/")) setCommandPaletteIndex(0);
-                  }}
-                  onKeyDown={handleKeyDown}
-                  onFocus={() => {
-                    if (input.startsWith("/")) setShowCommandPalette(true);
-                  }}
-                  onBlur={() => {
-                    setTimeout(() => setShowCommandPalette(false), 150);
-                  }}
-                  placeholder="질문해서 사건을 파악해보세요. '/'을 입력해 기능을 사용해보세요."
-                  className="flex-1 min-h-[52px] max-h-32 px-3 py-3.5 bg-transparent text-archive-text placeholder-archive-muted-deep focus:outline-none resize-none text-[16px] font-serif transition-colors"
-                  rows={1}
-                  disabled={loading}
-                />
+                <div className="flex-1 relative min-h-[52px] max-h-32">
+                  <div
+                    ref={inputOverlayRef}
+                    className="absolute inset-0 px-3 py-3.5 pointer-events-none overflow-auto input-overlay-sync text-archive-text text-[16px] font-serif leading-[1.5] whitespace-pre-wrap break-words"
+                    aria-hidden
+                  >
+                    {input ? formatInputWithCommands(input) : null}
+                  </div>
+                  <textarea
+                    ref={inputRef}
+                    value={input}
+                    onScroll={() => {
+                      if (inputRef.current && inputOverlayRef.current) {
+                        inputOverlayRef.current.scrollTop = inputRef.current.scrollTop;
+                        inputOverlayRef.current.scrollLeft = inputRef.current.scrollLeft;
+                      }
+                    }}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setInput(v);
+                      setSuggestionIndex(-1);
+                      setShowCommandPalette(v.startsWith("/") && !isCompleteCommand(v));
+                      if (v.startsWith("/") && !isCompleteCommand(v)) setCommandPaletteIndex(0);
+                    }}
+                    onKeyDown={handleKeyDown}
+                    onFocus={() => {
+                      if (input.startsWith("/") && !isCompleteCommand(input)) setShowCommandPalette(true);
+                    }}
+                    onBlur={() => {
+                      setTimeout(() => setShowCommandPalette(false), 150);
+                    }}
+                    placeholder="질문해서 사건을 파악해보세요. '/'을 입력해 기능을 사용해보세요."
+                    className="absolute inset-0 w-full min-h-[52px] max-h-32 px-3 py-3.5 bg-transparent text-transparent caret-archive-accent placeholder:text-archive-muted-deep focus:outline-none resize-none text-[16px] font-serif leading-[1.5]"
+                    rows={1}
+                    disabled={loading}
+                  />
                 </div>
+                </div>
+                {(input.startsWith("/가설") || input.startsWith("/추리")) && (
+                  <p className="mt-1.5 text-archive-muted text-[12px]">
+                    {input.startsWith("/가설")
+                      ? <>예: <span className="text-archive-accent font-mono">/가설</span> 박지훈이 범인인 것 같아</>
+                      : <>예: <span className="text-archive-accent font-mono">/추리</span> 박지훈이 비자금 때문에 약물로 범행했다</>}
+                  </p>
+                )}
                 {showCommandPalette && (
                   <div
                     ref={paletteRef}
@@ -586,7 +643,10 @@ export default function Home() {
                     <button
                       key={cmd}
                       type="button"
-                      onClick={() => handleSelectCommand(cmd)}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        handleSelectCommand(cmd);
+                      }}
                       className={`w-full px-4 py-2.5 text-left flex items-center gap-3 transition-colors ${
                         i === commandPaletteIndex
                           ? "bg-archive-accent/20 text-archive-accent"
