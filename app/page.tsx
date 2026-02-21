@@ -486,7 +486,7 @@ export default function Home() {
         <header className="shrink-0 py-2.5 px-4 border-b border-archive-border flex items-center justify-between gap-4 font-mono z-10 relative bg-black/70 backdrop-blur-md">
           <h1 className="text-base font-bold text-archive-text flex items-center gap-2 tracking-wide">
             <span className="w-1.5 h-3 bg-archive-accent caret-blink inline-block"></span>
-            AI 셜록 <span className="text-archive-accent opacity-80 text-xs">v 0.1</span>
+            AI 셜록 <span className="text-archive-accent opacity-80 text-xs">v0.1</span>
           </h1>
         </header>
 

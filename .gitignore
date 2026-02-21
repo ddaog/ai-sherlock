@@ -32,3 +32,4 @@ yarn-error.log*
 
 # embeddings cache (optional - can regenerate)
 # data/embeddings.json
+.vercel
