@@ -486,11 +486,8 @@ export default function Home() {
         <header className="shrink-0 py-2.5 px-4 border-b border-archive-border flex items-center justify-between gap-4 font-mono z-10 relative bg-black/70 backdrop-blur-md">
           <h1 className="text-base font-bold text-archive-text flex items-center gap-2 tracking-wide">
             <span className="w-1.5 h-3 bg-archive-accent caret-blink inline-block"></span>
-            사건 기록 시스템 <span className="text-archive-accent opacity-80 text-xs">v1.4</span>
+            AI 셜록 <span className="text-archive-accent opacity-80 text-xs">v 0.1</span>
           </h1>
-          <p className="text-archive-muted-deep text-[10px] shrink-0 tracking-widest uppercase">
-            누적 비용: ₩{cumulativeCostKrw.toFixed(3)}
-          </p>
         </header>
 
         {hypotheses.length > 0 && (
@@ -595,13 +592,6 @@ export default function Home() {
                             </li>
                           ))}
                         </ul>
-                      </div>
-                    )}
-                    {msg.usage && (
-                      <div className="px-5 mt-4">
-                        <p className="text-archive-muted-deep text-[11px] pt-3 border-t border-archive-border-subtle font-mono text-right uppercase tracking-wider">
-                          토큰: {msg.usage.totalTokens} (입력 {msg.usage.promptTokens} + 출력 {msg.usage.completionTokens} + 임베딩 {msg.usage.embeddingTokens}) · 비용: ₩{(msg.usage.costKrw ?? 0).toFixed(3)}
-                        </p>
                       </div>
                     )}
                   </div>
